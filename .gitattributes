@@ -1,0 +1,9 @@
+# Preserve binary assets without line-ending conversion.
+* -text
+*.wasm binary
+*.dll  binary
+*.exe  binary
+*.png  binary
+*.ico  binary
+*.zip  binary
+*.pdf  binary

@@ -1,0 +1,21 @@
+bin/
+obj/
+artifacts/
+output/
+*.user
+*.suo
+.DS_Store
+tests/generated/
+tests/__pycache__/
+
+# Generated test files, local configuration and credentials
+tests/results/
+__pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*.p12

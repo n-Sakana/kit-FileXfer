@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net9.0</TargetFramework>
+    <AssemblyName>FileXfer</AssemblyName>
+    <StartupObject>FileXfer.MiniUIHost</StartupObject>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <NoWarn>$(NoWarn);CA1416;CS8632;CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8625;SYSLIB0050</NoWarn>
+    <MiniUIRoot Condition="'$(MiniUIRoot)' == ''">$(MSBuildThisFileDirectory)../../miniUI</MiniUIRoot>
+  </PropertyGroup>
+  <!-- Read-only source inclusion: never creates bin/obj or changes files in MiniUI. -->
+  <ItemGroup>
+    <Compile Include="$(MiniUIRoot)/src/MiniUI.Core/**/*.cs;$(MiniUIRoot)/src/MiniUI.Platform.Linux/**/*.cs"
+             Exclude="$(MiniUIRoot)/src/**/obj/**;$(MiniUIRoot)/src/**/bin/**" />
+    <Compile Include="../src/**/*.cs" Exclude="../src/App/Program.cs;../src/App/DesktopApp.cs;../src/App/DesktopWindow.cs;../src/App/WebViewSecurity.cs" />
+    <Compile Include="*.cs" />
+    <Reference Include="zxing"><HintPath>../lib/zxing.dll</HintPath><Private>true</Private></Reference>
+    <EmbeddedResource Include="../web/*" LogicalName="FileXfer.Web.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="ui/*" LogicalName="FileXfer.MiniUI.%(Filename)%(Extension)" />
+    <None Include="$(MiniUIRoot)/LICENSE" Link="licenses/MiniUI-LICENSE" CopyToOutputDirectory="PreserveNewest" Condition="Exists('$(MiniUIRoot)/LICENSE')" />
+  </ItemGroup>
+  <Target Name="CheckMiniUI" BeforeTargets="PrepareForBuild">
+    <Error Condition="!Exists('$(MiniUIRoot)/src/MiniUI.Core/Engine/Types.cs')" Text="Set -p:MiniUIRoot=/path/to/miniUI (read-only source dependency)." />
+  </Target>
+</Project>

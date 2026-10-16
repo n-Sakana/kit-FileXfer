@@ -1,0 +1,40 @@
+# FileXfer の Linux 起動
+
+NixOS では `./FileXfer` が .NET SDK 9・GTK3/X11・ffmpeg 等の環境で
+MiniUI ホストをビルドして起動します。MiniUI ソースの既定の場所は、このリポジトリから
+見て `../miniUI` です。別の場所にある場合は `MINIUI_ROOT` で指定します。
+
+```bash
+./FileXfer --path ./input
+```
+
+ビルドだけを行う場合は次を使います。
+
+```bash
+./tools/linux/build.sh
+./FileXfer.sh
+```
+
+出力は `artifacts/miniui-linux/FileXfer.dll` です。
+`--path`、`--mode optical`、`--port`、`--no-browser` と、MiniUI 固有の
+`--data-dir`、`--font-dir`、`--duration-ms`、`--screenshot`、`--mcp` を利用できます。
+保存先は `--data-dir` で指定できます。カメラは `FileXfer_CAMERA_DEVICE=/dev/videoN` で選びます。
+
+MiniUI を使わず、ブラウザで光学転送の画面を開く場合は次を使います。
+
+```bash
+dotnet run --project FileXfer.csproj -- --no-browser
+```
+
+起動時に表示される localhost URL をブラウザで開いてください。
+
+## アプリメニューに登録する
+
+```bash
+./tools/linux/install-desktop.sh
+```
+
+現在の配置先を埋め込んだ `FileXfer.desktop` を、ユーザー用の
+`${XDG_DATA_HOME:-$HOME/.local/share}/applications` に生成します。管理者権限は不要です。
+配布物の `FileXfer.desktop.in` は登録用テンプレートです。
+フォルダを移した場合は、移動先で登録コマンドを再実行してください。

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=FileXfer
+Comment=Optical file transfer
+Exec=@EXEC@
+Path=@PATH@
+Icon=@ICON@
+Terminal=true
+Categories=Utility;
+StartupNotify=false

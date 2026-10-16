@@ -1,0 +1,65 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework Condition="'$(OS)' == 'Windows_NT'">net9.0-windows</TargetFramework>
+    <TargetFramework Condition="'$(OS)' != 'Windows_NT'">net9.0</TargetFramework>
+    <UseWPF Condition="'$(TargetFramework)' == 'net9.0-windows'">true</UseWPF>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <Nullable>disable</Nullable>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+    <AssemblyName>FileXfer</AssemblyName>
+    <RootNamespace>FileXfer</RootNamespace>
+    <RuntimeIdentifiers Condition="'$(TargetFramework)' == 'net9.0-windows'">win-x64</RuntimeIdentifiers>
+    <RuntimeIdentifiers Condition="'$(TargetFramework)' == 'net9.0'">linux-x64</RuntimeIdentifiers>
+    <PublishSingleFile Condition="'$(RuntimeIdentifier)' != ''">true</PublishSingleFile>
+    <SelfContained Condition="'$(RuntimeIdentifier)' != ''">true</SelfContained>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <PublishTrimmed>false</PublishTrimmed>
+    <DebugType>embedded</DebugType>
+    <DefaultItemExcludes>$(DefaultItemExcludes);archive/**;tests/**;desktop/**;artifacts/**;output/**</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="src/**/*.cs" />
+    <Reference Include="zxing">
+      <HintPath>lib\zxing.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Microsoft.Web.WebView2.Core" Condition="'$(TargetFramework)' == 'net9.0-windows'">
+      <HintPath>lib\Microsoft.Web.WebView2.Core.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+    <Reference Include="Microsoft.Web.WebView2.Wpf" Condition="'$(TargetFramework)' == 'net9.0-windows'">
+      <HintPath>lib\Microsoft.Web.WebView2.Wpf.dll</HintPath>
+      <Private>true</Private>
+    </Reference>
+
+    <EmbeddedResource Include="web/index.html" LogicalName="FileXfer.Web.index.html" />
+    <EmbeddedResource Include="web/app.css" LogicalName="FileXfer.Web.app.css" />
+    <EmbeddedResource Include="web/optical-core.js" LogicalName="FileXfer.Web.optical-core.js" />
+    <EmbeddedResource Include="web/zxing-reader.js" LogicalName="FileXfer.Web.zxing-reader.js" />
+    <EmbeddedResource Include="web/app.js" LogicalName="FileXfer.Web.app.js" />
+    <EmbeddedResource Include="web/qr-worker.js" LogicalName="FileXfer.Web.qr-worker.js" />
+    <EmbeddedResource Include="web/zxing_reader-EOacYbLr.wasm" LogicalName="FileXfer.Web.zxing_reader-EOacYbLr.wasm" />
+    <EmbeddedResource Include="web/icon.svg" LogicalName="FileXfer.Web.icon.svg" />
+    <EmbeddedResource Include="web/manifest.webmanifest" LogicalName="FileXfer.Web.manifest.webmanifest" />
+    <EmbeddedResource Include="web/service-worker.js" LogicalName="FileXfer.Web.service-worker.js" />
+
+    <None Update="lib\zxing.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="lib\LICENSE-ZXing.Net.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="lib\LICENSE-zxing-cpp.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="lib\LICENSE-zxing-wasm.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="lib\Microsoft.Web.WebView2.Core.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="lib\Microsoft.Web.WebView2.Wpf.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="lib\WebView2Loader.dll" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="lib\LICENSE-Microsoft.Web.WebView2.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Update="lib\NOTICE-Microsoft.Web.WebView2.txt" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'$(TargetFramework)' == 'net9.0'">
+    <Compile Remove="src\App\DesktopApp.cs" />
+    <Compile Remove="src\App\DesktopWindow.cs" />
+    <Compile Remove="src\App\WebViewSecurity.cs" />
+  </ItemGroup>
+</Project>
