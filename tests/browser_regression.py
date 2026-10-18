@@ -377,13 +377,15 @@ with sync_playwright() as pw:
       window.virtualCameraTimer=setInterval(()=>{ctx.drawImage(images[frame++%images.length],0,0);},100);
       navigator.mediaDevices.getUserMedia=async()=>canvas.captureStream(30);
     }""")
-    ui.click('#readLocalCamera');ui.wait_for_function("document.getElementById('receiveState').textContent==='受信完了'",timeout=20000)
+    # The camera button belongs to 受け取る, as on the desktop screen.
+    ui.click('#opticalDirection [data-view="receive"]');assert ui.locator('#readLocalCamera').is_visible()
+    ui.click('#readLocalCamera');ui.wait_for_function("document.getElementById('receiveState').textContent==='受け取りました'",timeout=20000)
     assert len(set(state['uploads']))>=6 and state['fail_uploads']==0
     assert not errors, errors
     passed('canvas camera -> real WASM -> bounded uploads -> completion survives a 503 response')
     ui.screenshot(path=str(RESULTS/'receive-ui.png'),full_page=True)
     first_id=state['receive_ids'][-1]
-    ui.click('#readLocalCamera');ui.wait_for_function("document.getElementById('readLocalCamera').textContent.includes('止める')")
+    ui.click('#readLocalCamera');ui.wait_for_function("document.getElementById('readLocalCamera').textContent.includes('やめる')")
     ui.click('#readLocalCamera');ui.wait_for_timeout(100)
     assert len(state['receive_ids'])>=2 and state['receive_ids'][-1]!=first_id
     passed('camera restart gets a new receiver ID; stopping camera clears its stream')

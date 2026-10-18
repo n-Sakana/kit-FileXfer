@@ -24,6 +24,7 @@ namespace FileXfer
             _assets = AssetsExist(webDirectory)
                 ? LoadFromFiles(webDirectory)
                 : LoadFromResources();
+            AddFonts(Path.Combine(Path.GetFullPath(appDirectory), "ui", "fonts"));
             ApplyBuildId(string.IsNullOrWhiteSpace(buildId)
                 ? ComputeAssetBuildId()
                 : buildId);
@@ -136,6 +137,37 @@ namespace FileXfer
                 { "/manifest.webmanifest", LoadFile(webDirectory, "manifest.webmanifest", "application/manifest+json; charset=utf-8", true) },
                 { "/service-worker.js", LoadFile(webDirectory, "service-worker.js", "text/javascript; charset=utf-8", true) }
             };
+        }
+
+        // The phone page uses Inter like the desktop screens: from ui/fonts when it is there, otherwise from the
+        // assembly; without either the page falls back to the phone's own fonts.
+        private static readonly string[] FontNames = { "Inter-Regular.ttf", "Inter-Medium.ttf", "Inter-SemiBold.ttf" };
+
+        private static void AddFonts(string fontDirectory)
+        {
+            foreach (var name in FontNames)
+            {
+                var path = Path.Combine(fontDirectory, name);
+                if (File.Exists(path))
+                {
+                    _assets["/fonts/" + name] = new Asset(File.ReadAllBytes(path), "font/ttf", true);
+                    continue;
+                }
+
+                using (var stream = Assembly.GetExecutingAssembly().GetManifestResourceStream("FileXfer.Fonts." + name))
+                {
+                    if (stream == null)
+                    {
+                        continue;
+                    }
+
+                    using (var buffer = new MemoryStream())
+                    {
+                        stream.CopyTo(buffer);
+                        _assets["/fonts/" + name] = new Asset(buffer.ToArray(), "font/ttf", true);
+                    }
+                }
+            }
         }
 
         private static Asset LoadFile(

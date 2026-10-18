@@ -13,11 +13,21 @@ var SHELL = [
   "/icon.svg?v=" + BUILD_ID,
   "/manifest.webmanifest?v=" + BUILD_ID
 ];
+// Kept when the PC serves them; without them the page uses the phone's own fonts.
+var FONTS = [
+  "/fonts/Inter-Regular.ttf?v=" + BUILD_ID,
+  "/fonts/Inter-Medium.ttf?v=" + BUILD_ID,
+  "/fonts/Inter-SemiBold.ttf?v=" + BUILD_ID
+];
 
 self.addEventListener("install", function (event) {
   event.waitUntil(
     caches.open(CACHE_NAME).then(function (cache) {
-      return cache.addAll(SHELL);
+      return cache.addAll(SHELL).then(function () {
+        return Promise.all(FONTS.map(function (url) {
+          return cache.add(url).catch(function () {});
+        }));
+      });
     }).then(function () {
       return self.skipWaiting();
     })

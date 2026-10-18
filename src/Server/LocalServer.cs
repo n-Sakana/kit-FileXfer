@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Net;
+using System.Net.Sockets;
 using System.Reflection;
 using System.Text;
 using System.Threading;
@@ -26,6 +27,7 @@ namespace FileXfer
         private readonly OpticalReceiveService _opticalReceiver;
         private readonly RemoteControlRegistry _remotes = new RemoteControlRegistry();
         private readonly TailnetDiscovery _tailnet = new TailnetDiscovery();
+        private LoopbackRelay _relay;
 
         public LocalServer(
             int port,
@@ -42,12 +44,46 @@ namespace FileXfer
             _requestShutdown = requestShutdown;
         }
 
+        internal RemoteControlRegistry Remotes
+        {
+            get { return _remotes; }
+        }
+
+        internal TailnetDiscovery Tailnet
+        {
+            get { return _tailnet; }
+        }
+
         public Uri Start()
         {
             _listener.IgnoreWriteExceptions = true;
-            _listener.Prefixes.Add(string.Format("http://127.0.0.1:{0}/", _port));
-            _listener.Prefixes.Add(string.Format("http://localhost:{0}/", _port));
-            _listener.Start();
+            if (PlatformInfo.IsWindows)
+            {
+                // http.sys takes a request for http://127.0.0.1:port/ by the address it arrives on, whatever its
+                // Host header, so the phone's requests from tailscale serve (tailnet Host) arrive here directly.
+                _listener.Prefixes.Add(string.Format("http://127.0.0.1:{0}/", _port));
+                _listener.Prefixes.Add(string.Format("http://localhost:{0}/", _port));
+                _listener.Start();
+            }
+            else
+            {
+                // The managed listener answers only Host headers that name a prefix: a loopback relay owns the port
+                // and hands requests to the listener under its own name (LoopbackRelay).
+                int inner = LoopbackRelay.FreePort();
+                _listener.Prefixes.Add(string.Format("http://127.0.0.1:{0}/", inner));
+                _listener.Start();
+                var relay = new LoopbackRelay(_port);
+                try
+                {
+                    relay.Start(inner);
+                }
+                catch (SocketException exception)
+                {
+                    _listener.Stop();
+                    throw new HttpListenerException(exception.ErrorCode, exception.Message);
+                }
+                _relay = relay;
+            }
             return new Uri(string.Format("http://localhost:{0}/", _port));
         }
 
@@ -64,6 +100,7 @@ namespace FileXfer
                 }
             }))
             {
+                var relay = _relay == null ? null : _relay.RunAsync(cancellationToken);
                 var pending = new List<Task>();
                 while (!cancellationToken.IsCancellationRequested && _listener.IsListening)
                 {
@@ -109,12 +146,21 @@ namespace FileXfer
                         finally { _requestSlots.Release(); }
                     }));
                 }
+                if (relay != null)
+                {
+                    pending.Add(relay);
+                }
                 await Task.WhenAny(Task.WhenAll(pending), Task.Delay(2000));
             }
         }
 
         public void Dispose()
         {
+            if (_relay != null)
+            {
+                _relay.Dispose();
+            }
+
             if (_listener.IsListening)
             {
                 _listener.Stop();
@@ -228,7 +274,7 @@ namespace FileXfer
         {
             var request = context.Request;
             var path = request.Url == null ? "/" : request.Url.AbsolutePath;
-            var role = GetRequestRole(request);
+            var role = GetRequestRole(request, _relay != null);
 
             if (request.HttpMethod == "GET" && path == "/api/status")
             {
@@ -889,9 +935,13 @@ namespace FileXfer
             }
         }
 
-        private static string GetRequestRole(HttpListenerRequest request)
+        private static string GetRequestRole(HttpListenerRequest request, bool relayed)
         {
-            var host = request.Headers["Host"];
+            // Behind the relay the listener sees its own name; the Host the request came with is in the relay's
+            // header (which the relay always sets, so a phone cannot choose it).
+            var host = relayed && request.Headers[LoopbackRelay.OriginalHostHeader] != null
+                ? request.Headers[LoopbackRelay.OriginalHostHeader]
+                : request.Headers["Host"];
             if (string.IsNullOrWhiteSpace(host))
             {
                 return "remote";

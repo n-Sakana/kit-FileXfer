@@ -8,7 +8,7 @@ $script:KeyName = "FileXfer"
 $script:Launcher = Join-Path $PSScriptRoot "context-menu.vbs"
 $script:FileXferScript = Join-Path (Split-Path $PSScriptRoot -Parent) "FileXfer.ps1"
 $script:MenuItems = @(
-    [pscustomobject]@{ Id = "01-open"; Label = "画面で開く"; Mode = "optical" }
+    [pscustomobject]@{ Id = "01-open"; Label = "Open"; Mode = "optical" }
 )
 $script:Contexts = @(
     "HKEY_CURRENT_USER\Software\Classes\*\shell",
@@ -126,12 +126,12 @@ function Invoke-Install {
         }
 
         Write-Host ""
-        Write-Host "FileXfer was added to file, folder, Explorer background and desktop background context menus." -ForegroundColor Green
+        Write-Host '  FileXfer was added to the right-click menu of files, folders, folder backgrounds and the desktop.' -ForegroundColor Green
         return $true
     }
     catch {
         Write-Host ""
-        Write-Host ("ERROR: " + $_.Exception.Message) -ForegroundColor Red
+        Write-Host ('  Error: ' + $_.Exception.Message) -ForegroundColor Red
         return $false
     }
     finally {

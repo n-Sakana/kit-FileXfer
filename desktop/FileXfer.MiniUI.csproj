@@ -1,4 +1,6 @@
 <Project Sdk="Microsoft.NET.Sdk">
+  <!-- FileXfer for Linux: MiniUI's engine and GTK3/X11 layer (from the miniUI sources, read only) showing ../ui with
+       FileXfer's native component (../native) in the same process. Built by tools/linux/build.sh. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net9.0</TargetFramework>
@@ -14,11 +16,12 @@
   <ItemGroup>
     <Compile Include="$(MiniUIRoot)/src/MiniUI.Core/**/*.cs;$(MiniUIRoot)/src/MiniUI.Platform.Linux/**/*.cs"
              Exclude="$(MiniUIRoot)/src/**/obj/**;$(MiniUIRoot)/src/**/bin/**" />
-    <Compile Include="../src/**/*.cs" Exclude="../src/App/Program.cs;../src/App/DesktopApp.cs;../src/App/DesktopWindow.cs;../src/App/WebViewSecurity.cs" />
+    <Compile Include="../src/**/*.cs" />
+    <Compile Include="../native/*.cs;../native/Linux/*.cs" />
     <Compile Include="*.cs" />
     <Reference Include="zxing"><HintPath>../lib/zxing.dll</HintPath><Private>true</Private></Reference>
     <EmbeddedResource Include="../web/*" LogicalName="FileXfer.Web.%(Filename)%(Extension)" />
-    <EmbeddedResource Include="ui/*" LogicalName="FileXfer.MiniUI.%(Filename)%(Extension)" />
+    <EmbeddedResource Include="../ui/fonts/Inter-*.ttf" LogicalName="FileXfer.Fonts.%(Filename)%(Extension)" />
     <None Include="$(MiniUIRoot)/LICENSE" Link="licenses/MiniUI-LICENSE" CopyToOutputDirectory="PreserveNewest" Condition="Exists('$(MiniUIRoot)/LICENSE')" />
   </ItemGroup>
   <Target Name="CheckMiniUI" BeforeTargets="PrepareForBuild">

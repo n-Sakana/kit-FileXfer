@@ -94,6 +94,14 @@ try {
     if ($null -ne $running) {
         for ($attempt = 0; $attempt -lt 20; $attempt++) {
             if (Invoke-RunningFileXfer $running $Mode $targetPath) {
+                # Started by the click in Explorer, this process may give the foreground to the FileXfer window;
+                # FileXfer asks for it too, but Windows refuses that to a window in the background.
+                try {
+                    Add-Type -AssemblyName Microsoft.VisualBasic
+                    [Microsoft.VisualBasic.Interaction]::AppActivate([int]$running.processId)
+                }
+                catch {
+                }
                 exit 0
             }
             Start-Sleep -Milliseconds 250

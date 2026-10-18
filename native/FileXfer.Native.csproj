@@ -1,0 +1,30 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!-- FileXfer's native component for the MiniUI Windows host: a Native AOT DLL exporting miniui_call and
+       miniui_image. It runs FileXfer's local server, optical send/receive, camera and file dialogs. -->
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <AssemblyName>FileXfer.Native</AssemblyName>
+    <RootNamespace>FileXfer</RootNamespace>
+    <OutputType>Library</OutputType>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <UseSystemResourceKeys>false</UseSystemResourceKeys>
+    <OptimizationPreference>Size</OptimizationPreference>
+    <StripSymbols>true</StripSymbols>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../src/**/*.cs" Exclude="../src/Common/NativePicker.cs" />
+    <Compile Include="*.cs;Windows/*.cs" />
+    <Reference Include="zxing"><HintPath>../lib/zxing.dll</HintPath></Reference>
+    <!-- JsonCodec serialises result objects by reflection: keep this assembly's metadata. -->
+    <TrimmerRootAssembly Include="FileXfer.Native" />
+  </ItemGroup>
+</Project>

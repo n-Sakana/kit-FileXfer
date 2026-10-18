@@ -55,17 +55,15 @@
   var darkModeQuery = typeof window.matchMedia === "function"
     ? window.matchMedia("(prefers-color-scheme: dark)")
     : null;
-  var infoTooltip = document.getElementById("infoTooltip");
-  var infoTooltipTarget = null;
 
   loadThemePreference();
   wireNavigation();
   wireControls();
-  wireInfoTips();
+  wireOverlayScrollbars();
   registerServiceWorker();
   watchCameraChanges();
   setPickerDisabled(true);
-  setListMessage("opticalFiles", "入力を読み込んでいます", "loading-state");
+  setListMessage("opticalFiles", "読み込んでいます", "loading-state");
   loadInitialState();
 
   async function loadInitialState() {
@@ -158,12 +156,10 @@
       });
     });
 
-    document.querySelectorAll("[data-selection-action]").forEach(function (button) {
-      button.addEventListener("click", function () {
-        setAllSelections(
-          button.dataset.selectionMode,
-          button.dataset.selectionAction === "all");
-      });
+    document.getElementById("selectAll").addEventListener("click", function () {
+      var files = selectableFiles("optical");
+      var selected = files.filter(function (file) { return state.selections.optical.has(file.name); }).length;
+      setAllSelections("optical", selected < files.length);
     });
 
     document.querySelectorAll("[data-theme-toggle]").forEach(function (button) {
@@ -186,8 +182,17 @@
     document.getElementById("largerQr").addEventListener("click", function () {
       changeQrSize(1);
     });
-    document.getElementById("qrDisplaySize").addEventListener("input", function () {
-      setQrDisplaySize(Number(this.value));
+    document.getElementById("qrSmallerSetting").addEventListener("click", function () {
+      changeQrSize(-1);
+    });
+    document.getElementById("qrLargerSetting").addEventListener("click", function () {
+      changeQrSize(1);
+    });
+    document.getElementById("confirmOk").addEventListener("click", function () {
+      document.getElementById("confirmDialog").close("ok");
+    });
+    document.getElementById("confirmCancel").addEventListener("click", function () {
+      document.getElementById("confirmDialog").close("cancel");
     });
     ["cameraWidth", "cameraFps", "cameraWorkers"].forEach(function (id) {
       document.getElementById(id).addEventListener("change", function () {
@@ -197,7 +202,6 @@
     document.getElementById("cameraNoSignalHelp").addEventListener("click", function () {
       document.getElementById("cameraHelpDialog").showModal();
     });
-    document.getElementById("cameraNoSignalDismiss").addEventListener("click", dismissCameraQuietHint);
     document.getElementById("cameraHelpClose").addEventListener("click", function () {
       document.getElementById("cameraHelpDialog").close();
     });
@@ -231,8 +235,126 @@
       if (state.opticalRenderer) {
         sizeQrCanvas(state.opticalRenderer);
       }
+      renderFolderPath("optical");
     });
     applyQrSize();
+  }
+
+  // A long path keeps its start and its last folders, so the chosen folder stays readable (as on the PC).
+  function shortPath(path, element) {
+    if (!path) return "";
+    var room = Math.max(20, Math.floor(element.clientWidth / 7.4));
+    var weight = function (value) { var n = 0; for (var i = 0; i < value.length; i++) n += value.charCodeAt(i) > 0x2e80 ? 2 : 1; return n; };
+    if (weight(path) <= room) return path;
+    var sep = path.indexOf("\\") >= 0 ? "\\" : "/";
+    var parts = path.split(sep), head = parts[0], tail = [];
+    for (var i = parts.length - 1; i > 0; i--) {
+      var next = [parts[i]].concat(tail);
+      if (tail.length > 0 && weight(head + sep + "…" + sep + next.join(sep)) > room) break;
+      tail = next;
+    }
+    return head + sep + "…" + sep + tail.join(sep);
+  }
+
+  function renderFolderPath(mode) {
+    var folder = state.folders[mode];
+    var path = folder && folder.path ? folder.path : "";
+    document.querySelectorAll("[data-folder-path='" + mode + "']").forEach(function (element) {
+      element.textContent = shortPath(path, element);
+      element.title = path;
+    });
+  }
+
+  // Scrollbars as in the desktop window: shown while the page or the file list scrolls, or while the pointer is at
+  // the right edge, and draggable; nothing is drawn otherwise. Phones already draw their scrollbars this way.
+  function wireOverlayScrollbars() {
+    if (typeof window.matchMedia !== "function" || !window.matchMedia("(pointer: fine)").matches) {
+      return;
+    }
+    document.documentElement.classList.add("overlay-scrollbars");
+    overlayScrollbar(document.scrollingElement || document.documentElement, null);
+    overlayScrollbar(document.getElementById("opticalFiles"), document.querySelector(".table"));
+  }
+
+  function overlayScrollbar(scroller, box) {
+    var page = box === null;
+    var thumb = document.createElement("div");
+    thumb.className = "scroll-thumb" + (page ? " is-page" : "");
+    thumb.setAttribute("aria-hidden", "true");
+    (page ? document.body : box).appendChild(thumb);
+    var hideTimer = 0;
+    var hot = false;
+    var drag = null;
+
+    // The strip the thumb moves in, in the thumb's own coordinates.
+    function track() {
+      return page
+        ? { top: 2, height: window.innerHeight - 4 }
+        : { top: scroller.offsetTop + 2, height: scroller.clientHeight - 4 };
+    }
+    function place() {
+      var range = scroller.scrollHeight - scroller.clientHeight;
+      if (range <= 1) {
+        thumb.classList.remove("is-visible");
+        return false;
+      }
+      var strip = track();
+      var length = Math.max(24, strip.height * scroller.clientHeight / scroller.scrollHeight);
+      thumb.style.height = length + "px";
+      thumb.style.top = (strip.top + (strip.height - length) * scroller.scrollTop / range) + "px";
+      return true;
+    }
+    function show() {
+      window.clearTimeout(hideTimer);
+      if (!place()) {
+        return;
+      }
+      thumb.classList.add("is-visible");
+      if (!hot && !drag) {
+        hideTimer = window.setTimeout(function () { thumb.classList.remove("is-visible"); }, 900);
+      }
+    }
+    (page ? window : scroller).addEventListener("scroll", show, { passive: true });
+    document.addEventListener("pointermove", function (event) {
+      if (drag) {
+        return;
+      }
+      var bounds = page
+        ? { right: window.innerWidth, top: 0, bottom: window.innerHeight }
+        : scroller.getBoundingClientRect();
+      var near = event.clientX >= bounds.right - 14 && event.clientX <= bounds.right &&
+        event.clientY >= bounds.top && event.clientY <= bounds.bottom;
+      if (near !== hot) {
+        hot = near;
+        thumb.classList.toggle("is-hot", hot);
+        show();
+      }
+    });
+    thumb.addEventListener("pointerdown", function (event) {
+      drag = { y: event.clientY, scroll: scroller.scrollTop };
+      thumb.setPointerCapture(event.pointerId);
+      thumb.classList.add("is-hot");
+      event.preventDefault();
+    });
+    thumb.addEventListener("pointermove", function (event) {
+      if (!drag) {
+        return;
+      }
+      var strip = track();
+      var range = scroller.scrollHeight - scroller.clientHeight;
+      var travel = Math.max(1, strip.height - thumb.getBoundingClientRect().height);
+      scroller.scrollTop = drag.scroll + (event.clientY - drag.y) * range / travel;
+    });
+    function endDrag() {
+      if (!drag) {
+        return;
+      }
+      drag = null;
+      thumb.classList.toggle("is-hot", hot);
+      show();
+    }
+    thumb.addEventListener("pointerup", endDrag);
+    thumb.addEventListener("pointercancel", endDrag);
   }
 
   function loadThemePreference() {
@@ -296,84 +418,6 @@
     });
   }
 
-  function wireInfoTips() {
-    document.querySelectorAll("[data-info-tip]").forEach(function (target) {
-      target.addEventListener("pointerenter", function () {
-        showInfoTip(target);
-      });
-      target.addEventListener("pointerleave", function () {
-        hideInfoTip(target, false);
-      });
-      target.addEventListener("focus", function () {
-        showInfoTip(target);
-      });
-      target.addEventListener("blur", function () {
-        hideInfoTip(target, false);
-      });
-      target.addEventListener("click", function () {
-        showInfoTip(target);
-      });
-      target.addEventListener("keydown", function (event) {
-        if (event.key === "Escape") {
-          hideInfoTip(target, true);
-          target.blur();
-        }
-      });
-    });
-    document.addEventListener("pointerdown", function (event) {
-      if (infoTooltipTarget && !infoTooltipTarget.contains(event.target)) {
-        hideInfoTip(infoTooltipTarget, true);
-      }
-    });
-    document.addEventListener("scroll", function () {
-      if (infoTooltipTarget) {
-        hideInfoTip(infoTooltipTarget, true);
-      }
-    }, true);
-    window.addEventListener("resize", function () {
-      if (infoTooltipTarget) {
-        hideInfoTip(infoTooltipTarget, true);
-      }
-    });
-  }
-
-  function showInfoTip(target) {
-    var text = target.dataset.infoTip;
-    if (!text) {
-      return;
-    }
-    infoTooltipTarget = target;
-    infoTooltip.textContent = text;
-    infoTooltip.hidden = false;
-    infoTooltip.style.left = "0px";
-    infoTooltip.style.top = "0px";
-
-    var margin = 10;
-    var gap = 8;
-    var targetBounds = target.getBoundingClientRect();
-    var tipBounds = infoTooltip.getBoundingClientRect();
-    var left = targetBounds.left + targetBounds.width / 2 - tipBounds.width / 2;
-    left = Math.max(margin, Math.min(window.innerWidth - tipBounds.width - margin, left));
-    var top = targetBounds.top - tipBounds.height - gap;
-    if (top < margin) {
-      top = targetBounds.bottom + gap;
-    }
-    top = Math.max(margin, Math.min(window.innerHeight - tipBounds.height - margin, top));
-    infoTooltip.style.left = Math.round(left) + "px";
-    infoTooltip.style.top = Math.round(top) + "px";
-  }
-
-  function hideInfoTip(target, force) {
-    if (infoTooltipTarget !== target) {
-      return;
-    }
-    if (!force && (document.activeElement === target || target.matches(":hover"))) {
-      return;
-    }
-    infoTooltipTarget = null;
-    infoTooltip.hidden = true;
-  }
-
   function navigate(page, moveFocus) {
     if (state.role === "remote") {
       page = "optical";
@@ -426,6 +470,7 @@
     }
 
     state.opticalView = view;
+    document.getElementById("appShell").dataset.view = view;
     document.querySelectorAll("#opticalDirection button").forEach(function (button) {
       var active = button.dataset.view === view;
       button.classList.toggle("is-active", active);
@@ -449,13 +494,8 @@
     document.documentElement.classList.toggle("role-remote", role === "remote");
     document.documentElement.classList.toggle("role-local", role === "local");
     document.getElementById("appShell").dataset.role = role;
-    document.getElementById("deviceName").textContent = device;
     document.getElementById("remoteDeviceName").textContent = device;
-    document.getElementById("readLocalCamera").textContent = role === "remote"
-      ? "この端末のカメラで読む"
-      : "この PC のカメラで読む";
 
-    var capabilities = status && status.capabilities ? status.capabilities : {};
     refreshCameraStatus();
     setPickerDisabled(!status || role !== "local");
     updateOpticalAction();
@@ -493,10 +533,9 @@
     });
   }
 
+  // The camera count is not shown; it only decides whether reading with this device's camera is offered.
   function setCapability(id, text, positive) {
-    var element = document.getElementById(id);
-    element.textContent = text;
-    element.classList.toggle("is-muted", !positive);
+    state.cameraAvailable = positive;
   }
 
   function applyFolder(mode, snapshot, preserveTransfer) {
@@ -511,11 +550,7 @@
       return true;
     }).map(function (file) { return file.name; }));
 
-    document.querySelectorAll("[data-folder-path='" + mode + "']").forEach(function (element) {
-      var displayPath = selectedSource && selectedSource.path ? selectedSource.path : "選ばれていません";
-      element.textContent = displayPath;
-      element.title = selectedSource && selectedSource.path ? selectedSource.path : "";
-    });
+    renderFolderPath(mode);
 
 
     renderFiles(mode);
@@ -541,7 +576,7 @@
     if (files.length === 0) {
       appendMessage(
         container,
-        "ファイルはありません",
+        state.role === "remote" ? "PC でファイルかフォルダを選んでください" : "ファイルかフォルダを選んでください",
         "empty-state");
       return;
     }
@@ -550,42 +585,25 @@
     files.forEach(function (file) {
       var row = document.createElement("button");
       row.type = "button";
-      row.className = "file-row";
+      row.className = "row file-row";
       row.dataset.fileName = file.name;
       row.title = file.name;
       row.setAttribute("role", "checkbox");
       row.setAttribute("aria-checked", state.selections[mode].has(file.name) ? "true" : "false");
-      row.classList.toggle("is-selected", state.selections[mode].has(file.name));
-      row.appendChild(fileNameCell(file));
-      row.appendChild(textCell(formatBytes(file.size), "file-size"));
-      row.appendChild(textCell(formatDate(file.modifiedUtc), "file-date"));
+      var check = document.createElement("span");
+      check.className = "check-cell";
+      check.setAttribute("aria-hidden", "true");
+      check.appendChild(textCell("", "check"));
+      row.appendChild(check);
+      row.appendChild(textCell(file.name, "c-name"));
+      row.appendChild(textCell(formatBytes(file.size), "c-size"));
+      row.appendChild(textCell(formatDate(file.modifiedUtc), "c-date"));
       row.addEventListener("click", function () {
         toggleSelection(mode, file.name, row);
       });
       fragment.appendChild(row);
     });
     container.appendChild(fragment);
-  }
-
-  function fileNameCell(file) {
-    var cell = document.createElement("span");
-    cell.className = "file-name";
-    var check = document.createElement("span");
-    check.className = "book-check";
-    check.textContent = "✓";
-    check.setAttribute("aria-hidden", "true");
-    cell.appendChild(check);
-    cell.appendChild(fileBadge(file));
-    cell.appendChild(textCell(file.name, "file-name-text"));
-    return cell;
-  }
-
-  function fileBadge(file) {
-    var badge = document.createElement("span");
-    badge.className = "file-badge kind-" + String(file.kind || "other").toLowerCase();
-    badge.textContent = file.badge || "FILE";
-    badge.setAttribute("aria-hidden", "true");
-    return badge;
   }
 
   function textCell(text, className) {
@@ -637,45 +655,27 @@
   }
 
   function updateSelectionActions(mode, files) {
-    var allButton = document.querySelector(
-      "[data-selection-mode='" + mode + "'][data-selection-action='all']");
-    var noneButton = document.querySelector(
-      "[data-selection-mode='" + mode + "'][data-selection-action='none']");
-    if (!allButton || !noneButton) {
-      return;
-    }
+    var all = document.getElementById("selectAll");
     var selectedCount = files.filter(function (file) {
       return state.selections[mode].has(file.name);
     }).length;
-    allButton.disabled = files.length === 0 || selectedCount === files.length;
-    noneButton.disabled = selectedCount === 0;
+    all.disabled = files.length === 0;
+    all.setAttribute("aria-checked", files.length > 0 && selectedCount === files.length
+      ? "true"
+      : selectedCount > 0 ? "mixed" : "false");
   }
 
   function updateSummary(mode) {
     var folder = state.folders[mode];
-    var panel = document.querySelector("[data-page-panel='" + mode + "']");
     var files = folder && Array.isArray(folder.files) ? folder.files : [];
     var selected = files.filter(function (file) {
       return state.selections[mode].has(file.name);
     });
-    panel.querySelector("[data-summary-count]").textContent = String(selected.length);
-    panel.querySelector("[data-summary-size]").textContent = formatBytes(selected.reduce(function (total, file) {
-      return total + file.size;
-    }, 0));
-
-    var typeContainer = panel.querySelector("[data-summary-types]");
-    typeContainer.replaceChildren();
-    var order = ["PDF", "Word", "Excel", "PowerPoint", "Text", "Other"];
-    order.forEach(function (kind) {
-      var count = selected.filter(function (file) { return file.kind === kind; }).length;
-      if (count === 0) {
-        return;
-      }
-      var pill = document.createElement("i");
-      pill.className = "summary-pill";
-      pill.textContent = kind + " " + count;
-      typeContainer.appendChild(pill);
-    });
+    document.getElementById("sendSummary").textContent = files.length === 0
+      ? ""
+      : selected.length.toLocaleString("ja-JP") + " ファイル · " + formatBytes(selected.reduce(function (total, file) {
+        return total + file.size;
+      }, 0));
     if (mode === "optical") {
       updateOpticalAction();
     }
@@ -689,8 +689,7 @@
     await openNativePicker(
       mode,
       "/api/pick-folder?mode=" + encodeURIComponent(mode),
-      { method: "POST" },
-      "フォルダを開きました");
+      { method: "POST" });
   }
 
   async function chooseFiles(mode) {
@@ -705,11 +704,10 @@
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ mode: mode })
-      },
-      "ファイルを開きました");
+      });
   }
 
-  async function openNativePicker(mode, url, options, successMessage) {
+  async function openNativePicker(mode, url, options) {
     setPickerDisabled(true);
     try {
       var result = await requestJson(url, options);
@@ -720,7 +718,6 @@
         throw new Error("選んだものを読み込めませんでした。");
       }
       applyFolder(mode, result.folder);
-      showToast(successMessage);
     } catch (error) {
       showToast(errorMessage(error));
     } finally {
@@ -750,7 +747,6 @@
     state.opticalBusy = true;
     updateOpticalAction();
     button.setAttribute("aria-busy", "true");
-    button.textContent = "QR を準備しています…";
     try {
       var requestedFrameBytes = fromRemoteCommand
         ? Number(command.frameBytes)
@@ -790,7 +786,7 @@
       document.getElementById("frameRate").value = String(result.framesPerSecond);
       document.getElementById("errorCorrection").value = String(result.errorCorrection || errorCorrection);
       updateFrameAmountOptions();
-      if (!confirmLargeOptical(result)) {
+      if (!(await confirmLargeOptical(result))) {
         await requestJson("/api/optical/stop", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -801,7 +797,7 @@
       state.opticalSession = result;
       requestScreenWakeLock();
       state.opticalPreviousFocus = document.activeElement;
-      document.getElementById("qrProgress").textContent = "最初の QR を描画しています";
+      setQrStatus("QR を準備しています", false);
       document.getElementById("qrOverlay").hidden = false;
       document.getElementById("closeQr").focus({ preventScroll: true });
       startQrRenderer(result);
@@ -810,22 +806,31 @@
     } finally {
       state.opticalBusy = false;
       button.removeAttribute("aria-busy");
-      button.textContent = "この画面に QR を出す";
       updateOpticalAction();
     }
   }
 
+  // Large transfers take a while: ask first, as the desktop screen does.
   function confirmLargeOptical(result) {
     var largeTransferBytes = 16 * 1024 * 1024;
     if (Number(result.originalBytes || 0) <= largeTransferBytes) {
-      return true;
+      return Promise.resolve(true);
     }
-    return window.confirm(
-      "選んだ内容は " + formatBytes(result.originalBytes) + " あります。大きいため転送に時間がかかります。\n\n" +
-      "見込みは最短 " + formatSeconds(result.minimumSeconds) + "（" +
-      Number(result.frameBytes).toLocaleString("ja-JP") + " bytes / frame・" +
-      Number(result.framesPerSecond).toLocaleString("ja-JP") + " fps）です。\n" +
-      "実際には、取りこぼしたフレームを噴水符号で補うぶん長くなります。\n\n転送を始めますか？");
+    var dialog = document.getElementById("confirmDialog");
+    document.getElementById("confirmText").textContent = formatBytes(result.originalBytes) +
+      " あります。送り終えるまで少なくとも " + formatSeconds(result.minimumSeconds) + "かかります。";
+    dialog.returnValue = "";
+    return new Promise(function (resolve) {
+      dialog.addEventListener("close", function () { resolve(dialog.returnValue === "ok"); }, { once: true });
+      dialog.showModal();
+      document.getElementById("confirmOk").focus();
+    });
+  }
+
+  function setQrStatus(text, alert) {
+    var status = document.getElementById("qrProgress");
+    status.textContent = text;
+    status.classList.toggle("is-alert", alert);
   }
 
   function setActualFrameAmount(value) {
@@ -875,14 +880,9 @@
       drawQrFrame(renderer, entry.image);
       if (!renderer.startedAt) renderer.startedAt = now;
       renderer.drawn++;
-      if (now - renderer.lastStatusAt >= 250) {
-        var actualFps = (renderer.drawn - 1) * 1000 / Math.max(1, now - renderer.startedAt);
-        document.getElementById("qrProgress").textContent =
-          "フレーム " + renderer.drawn.toLocaleString("ja-JP") +
-          " ・ 表示 " + actualFps.toFixed(1) + " / " + session.framesPerSecond + " fps" +
-          " ・ " + session.frameBytes.toLocaleString("ja-JP") + " B/QR" +
-          " ・ 元ブロック " + session.sourceBlocks.toLocaleString("ja-JP");
-        renderer.lastStatusAt = now;
+      if (renderer.drawn === 1 || renderer.retrying) {
+        renderer.retrying = false;
+        setQrStatus("QR を表示しています", false);
       }
       renderer.nextAt += renderer.interval;
       // Do not rapidly flash several catch-up frames after a stalled request/tab.
@@ -930,12 +930,13 @@
     } catch (error) {
       if (!isCurrentQrRenderer(renderer)) return;
       if (error.status >= 400 && error.status < 500 && error.status !== 408 && error.status !== 429) {
-        showToast("QR 表示のセッションが終了しました。もう一度開始してください。");
+        showToast("QR を出すのが止まりました。もう一度出してください。");
         stopOptical();
         return;
       }
       batch.failures++;
-      document.getElementById("qrProgress").textContent = "QR の通信を再試行しています…（表示を保持中）";
+      renderer.retrying = true;
+      setQrStatus("PC とのつながりを待っています", true);
       batch.retryTimer = window.setTimeout(function () {
         batch.retryTimer = null;
         fetchQrBatch(renderer, batch);
@@ -968,9 +969,9 @@
       Number.parseFloat(overlayStyle.borderLeftWidth) +
       Number.parseFloat(overlayStyle.borderRightWidth);
     var containerWidth = overlay.getBoundingClientRect().width || window.innerWidth;
-    var verticalChrome = 70;
-    overlay.querySelectorAll(".qr-controls, .qr-progress, .qr-hint").forEach(function (element) {
-      if (getComputedStyle(element).display !== "none") verticalChrome += element.getBoundingClientRect().height + 12;
+    var verticalChrome = 56;
+    overlay.querySelectorAll(".present-bar, .qr-status.is-alert").forEach(function (element) {
+      if (getComputedStyle(element).display !== "none") verticalChrome += element.getBoundingClientRect().height + 16;
     });
     var viewportBudget = Math.max(1, Math.min(window.innerWidth - 36, window.innerHeight - verticalChrome));
     var containerBudget = Math.max(1, containerWidth - horizontalChrome);
@@ -1081,7 +1082,7 @@
     state.cameraLastDecodedAt = 0;
     state.cameraFrameId = 0;
     var generation = ++state.cameraGeneration;
-    setCameraLabel("カメラを準備しています…");
+    setCameraLabel("カメラを準備しています");
     updateOpticalAction();
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
@@ -1155,7 +1156,7 @@
         },
         onTransient: function () {
           if (generation === state.cameraGeneration && state.cameraRunning)
-            setCameraLabel("接続を再試行しています…（受信済みデータは保持）");
+            document.getElementById("receiveState").textContent = "PC とのつながりを待っています";
         },
         onFatal: function (error) {
           if (generation === state.cameraGeneration) finishCameraError(errorMessage(error));
@@ -1168,14 +1169,12 @@
       stream.getVideoTracks().forEach(function (track) {
         track.addEventListener("ended", function () {
           if (generation === state.cameraGeneration && state.cameraRunning)
-            finishCameraError("カメラが切断されました。接続を確認して再開してください。");
+            finishCameraError("カメラが外れました。つなぎ直して、もう一度読んでください。");
         });
       });
       document.getElementById("cameraPreview").classList.add("is-live");
-      document.getElementById("cameraFrame").classList.add("is-live");
-      reportCameraSettings();
       applyCameraExtras();
-      setCameraLabel("ストリームを探しています…");
+      document.getElementById("receiveState").textContent = "QR を待っています";
       setCapability("statusCamera", "利用可能", true);
       updateOpticalAction();
       armCameraQuietHint(generation);
@@ -1188,21 +1187,6 @@
         finishCameraError(cameraErrorMessage(error));
       }
     }
-  }
-
-  function reportCameraSettings() {
-    var track = state.cameraStream && state.cameraStream.getVideoTracks()[0];
-    if (!track || typeof track.getSettings !== "function") {
-      return;
-    }
-    var settings = track.getSettings();
-    var askedFps = Number(document.getElementById("cameraFps").value || "60");
-    var gotFps = Math.round(Number(settings.frameRate || 0));
-    var fpsNote = gotFps && gotFps !== askedFps ? "（指定 " + askedFps + "）" : "";
-    document.getElementById("cameraActual").textContent =
-      String(settings.width || "—") + "×" + String(settings.height || "—") +
-      " @ " + (gotFps || "—") + " fps" + fpsNote + "・worker " +
-      state.cameraWorkers.length;
   }
 
   async function applyCameraExtras() {
@@ -1236,7 +1220,6 @@
 
   async function applyReceiveSettings() {
     if (!state.cameraRunning || state.cameraComplete) {
-      document.getElementById("cameraActual").textContent = "カメラ開始時に適用";
       return;
     }
 
@@ -1253,11 +1236,8 @@
         frameRate: { ideal: Number(document.getElementById("cameraFps").value || "60") }
       });
     } catch (_) {
-      document.getElementById("cameraActual").textContent =
-        "このカメラは実行中の変更を拒みました。再起動すると適用されます";
-      return;
+      showToast("このカメラは読んでいる間に設定を変えられません。読み直すと変わります。");
     }
-    reportCameraSettings();
   }
 
   function startCameraWorkers(generation) {
@@ -1278,7 +1258,7 @@
           if (reason && !state.cameraWorkerReason) state.cameraWorkerReason = String(reason);
           if (generation === state.cameraGeneration && state.cameraWorkers.indexOf(slot) >= 0 &&
               state.cameraWorkers.every(function (candidate) { return candidate.failed; }))
-            finishCameraError("QR 読み取り機能を読み込めませんでした。画面を再読み込みしてください。"
+            finishCameraError("QR の読み取りを始められませんでした。ページを読み込み直してください。"
               + (state.cameraWorkerReason ? "（" + state.cameraWorkerReason + "）" : ""));
         };
         slot.initTimer = window.setTimeout(fail, 15000);
@@ -1392,22 +1372,19 @@
     var percent = Math.max(0, Math.min(100, Math.round(Number(result.progress || 0) * 100)));
     document.getElementById("receiveProgressBar").style.width = percent + "%";
     document.getElementById("receiveProgress").setAttribute("aria-valuenow", String(percent));
-    document.getElementById("receiveState").textContent = result.complete ? "受信完了" : "受信中 " + percent + "%";
+    document.getElementById("receiveState").textContent = result.complete ? "受け取りました" : "受け取っています " + percent + "%";
     document.getElementById("receiveRate").textContent = formatRate(result.kilobytesPerSecond);
-    document.getElementById("receiveFrames").textContent = Number(result.framesCollected || 0).toLocaleString("ja-JP") + " 枚";
     var elapsed = Number(result.elapsedSeconds || 0);
     var progress = Number(result.progress || 0);
     var remaining = progress > 0 && progress < 1 ? elapsed * (1 - progress) / progress : 0;
     document.getElementById("receiveEta").textContent = result.complete
-      ? formatSeconds(elapsed) + " 合計"
+      ? "合計 " + formatSeconds(elapsed)
       : remaining > 0
-        ? "残り約 " + formatSeconds(remaining)
-        : "見積もり中";
+        ? "残り " + formatSeconds(remaining)
+        : "";
     document.getElementById("receiveDetail").textContent =
       Number(result.solvedBlocks || 0).toLocaleString("ja-JP") + " / " +
       Number(result.sourceBlocks || 0).toLocaleString("ja-JP") + " ブロック";
-    document.getElementById("receiveItem").textContent = formatBytes(result.totalBytes) + " の転送";
-    setCameraLabel(result.complete ? "受信完了" : "QR を読み取っています…");
 
     if (!result.complete) {
       armCameraQuietHint(state.cameraGeneration, 4000);
@@ -1415,21 +1392,20 @@
     }
 
     state.cameraComplete = true;
-    document.getElementById("cameraFrame").classList.add("is-complete");
     document.getElementById("receiveProgressBar").style.width = "100%";
+    document.getElementById("receiveProgressBar").classList.add("is-done");
     document.getElementById("receiveProgress").setAttribute("aria-valuenow", "100");
-    document.getElementById("receiveDetail").textContent =
-      Number(result.fileCount || 0).toLocaleString("ja-JP") + " ファイルを検算して保存しました";
-    document.getElementById("receiveItem").textContent =
-      (result.label || "受信データ") + "（" + Number(result.fileCount || 0).toLocaleString("ja-JP") + " ファイル）";
+    document.getElementById("receiveResultText").textContent =
+      Number(result.fileCount || 0).toLocaleString("ja-JP") + " ファイル · " + formatBytes(result.totalBytes);
     var output = document.getElementById("receiveOutputPath");
-    output.textContent = result.outputPath || ".\\output";
+    output.textContent = result.outputPath || "";
     output.title = result.outputPath || "";
+    document.getElementById("receiveResult").hidden = false;
     stopCamera(false, true);
-    setCameraLabel("受信完了");
+    setCameraLabel("受け取りました");
     showToast(Number(result.fileCount || 0).toLocaleString("ja-JP") + " ファイルを受け取りました");
     if (result.openError) {
-      showToast("受信は完了しました。フォルダを開けませんでした: " + result.openError);
+      showToast("受け取りましたが、フォルダを開けませんでした: " + result.openError);
     }
   }
 
@@ -1453,14 +1429,13 @@
     if (helpDialog.open) {
       helpDialog.close();
     }
-    document.getElementById("cameraFrame").classList.remove("is-live");
     document.getElementById("cameraPreview").classList.remove("is-live");
     var video = document.getElementById("cameraVideo");
     video.pause();
     video.srcObject = null;
     video.hidden = true;
     if (!keepLabel) {
-      setCameraLabel("カメラは未接続");
+      setCameraLabel("カメラは止まっています");
     }
     if (clearServer && state.cameraReceiverId) {
       fetch("/api/optical/receive/stop", {
@@ -1475,27 +1450,22 @@
   function finishCameraError(message) {
     stopCamera(true, true);
     setCameraLabel(message);
-    document.getElementById("receiveState").textContent = "読み取り停止";
-    document.getElementById("receiveDetail").textContent = message;
+    document.getElementById("receiveState").textContent = "止まりました";
     showToast(message);
   }
 
   function resetReceivePanel() {
     state.cameraComplete = false;
     state.cameraHasDecoded = false;
-    document.getElementById("cameraFrame").classList.remove("is-complete");
-    document.getElementById("receiveState").textContent = "受信待ち";
-    document.getElementById("receiveRate").textContent = "0 KB/s";
+    document.getElementById("receiveState").textContent = "待っています";
+    document.getElementById("receiveRate").textContent = "";
+    document.getElementById("receiveProgressBar").classList.remove("is-done");
     document.getElementById("receiveProgressBar").style.width = "0%";
     document.getElementById("receiveProgress").setAttribute("aria-valuenow", "0");
-    document.getElementById("receiveDetail").textContent = "フレームを待っています";
-    document.getElementById("receiveFrames").textContent = "0 枚";
-    document.getElementById("receiveEta").textContent = "見積もり中";
+    document.getElementById("receiveDetail").textContent = "";
+    document.getElementById("receiveEta").textContent = "";
     document.getElementById("cameraNoSignal").hidden = true;
-    document.getElementById("receiveItem").textContent = "未定";
-    var output = document.getElementById("receiveOutputPath");
-    output.textContent = ".\\output\\受信名_YYYYMMDD-HHmm";
-    output.title = "";
+    document.getElementById("receiveResult").hidden = true;
   }
 
   function armCameraQuietHint(generation, delay) {
@@ -1505,7 +1475,6 @@
         return;
       }
       document.getElementById("cameraNoSignal").hidden = false;
-      if (state.cameraHasDecoded) setCameraLabel("QR を再探索しています…（受信済みデータは保持）");
     }, delay || 8000);
   }
 
@@ -1570,13 +1539,11 @@
       || !hasFiles;
     var cameraButton = document.getElementById("readLocalCamera");
     cameraButton.disabled = !state.status;
-    cameraButton.textContent = state.cameraRunning
-      ? "読み取りを止める"
-      : state.cameraStarting
-        ? "カメラの準備を中止"
-        : state.role === "remote"
-          ? "この端末のカメラで読む"
-          : "この PC のカメラで読む";
+    cameraButton.textContent = state.cameraRunning || state.cameraStarting
+      ? "読むのをやめる"
+      : state.role === "remote"
+        ? "この端末のカメラで読む"
+        : "この PC のカメラで読む";
     document.getElementById("showRemoteQr").disabled = state.opticalBusy
       || state.role !== "local"
       || state.remotes.length === 0
@@ -1683,15 +1650,18 @@
   function renderConnectedRemotes() {
     var container = document.getElementById("connectedRemotes");
     container.replaceChildren();
+    if (state.remotes.length === 0) {
+      appendMessage(container, "つながっているスマホはありません", "list-empty");
+      return;
+    }
     state.remotes.forEach(function (remote) {
       var row = document.createElement("div");
-      row.className = "device-row";
+      row.className = "list-row";
       var dot = document.createElement("span");
-      dot.className = "device-dot";
+      dot.className = "dot";
       dot.setAttribute("aria-hidden", "true");
       row.appendChild(dot);
-      row.appendChild(textCell(remote.name || "リモコン", "device-name"));
-      row.appendChild(textCell("リモコン", "device-tag"));
+      row.appendChild(textCell(remote.name || "スマホ", ""));
       container.appendChild(row);
     });
   }
@@ -1710,11 +1680,11 @@
       }
       image.onload = function () {
         image.hidden = false;
-        status.textContent = "スマホで読んで接続";
+        status.textContent = "スマホのカメラで読むと、この PC につながります。";
       };
       image.onerror = function () {
         image.hidden = true;
-        status.textContent = "スマホ連携の QR を表示できませんでした";
+        status.textContent = "QR を出せませんでした。";
       };
       url.textContent = entry.url;
       url.title = entry.url;
@@ -1827,7 +1797,7 @@
     if (/Android/i.test(agent)) {
       return /Mobile/i.test(agent) ? "Android スマホ" : "Android タブレット";
     }
-    return "リモコン";
+    return "スマホ";
   }
 
   async function toggleDeviceMenu() {
@@ -1838,12 +1808,12 @@
     }
     menu.hidden = false;
     document.getElementById("remoteDeviceButton").setAttribute("aria-expanded", "true");
-    setListMessage("remoteDeviceMenu", "PC を探しています…", "remote-device-loading");
+    setListMessage("remoteDeviceMenu", "PC を探しています", "menu-message");
     try {
       var result = await requestJson("/api/devices");
       renderDeviceOptions(result && Array.isArray(result.devices) ? result.devices : []);
     } catch (error) {
-      setListMessage("remoteDeviceMenu", errorMessage(error), "remote-device-loading");
+      setListMessage("remoteDeviceMenu", errorMessage(error), "menu-message");
     }
   }
 
@@ -1856,22 +1826,21 @@
     var menu = document.getElementById("remoteDeviceMenu");
     menu.replaceChildren();
     if (devices.length === 0) {
-      appendMessage(menu, "FileXfer が動いている PC は見つかりません", "remote-device-loading");
+      appendMessage(menu, "FileXfer が動いている PC は見つかりません", "menu-message");
       return;
     }
     devices.forEach(function (device) {
       var button = document.createElement("button");
       button.type = "button";
-      button.className = "remote-device-option";
+      button.className = "menu-item";
       button.setAttribute("role", "option");
       button.setAttribute("aria-selected", device.current ? "true" : "false");
-      button.classList.toggle("is-current", Boolean(device.current));
+      button.classList.toggle("is-on", Boolean(device.current));
       var dot = document.createElement("span");
-      dot.className = "remote-dot";
+      dot.className = "dot";
       dot.setAttribute("aria-hidden", "true");
       button.appendChild(dot);
-      button.appendChild(textCell(device.name || device.host, "remote-device-option-name"));
-      button.appendChild(textCell(device.current ? "この PC" : (device.platform || "PC"), "remote-device-option-platform"));
+      button.appendChild(textCell(device.name || device.host, "menu-name"));
       button.addEventListener("click", function () {
         if (device.current || !device.url) {
           closeDeviceMenu();
@@ -1917,7 +1886,7 @@
       var body;
       try { body = await response.json(); } catch (_) { body = null; }
       if (!response.ok || body === null) {
-        var error = new Error(body && body.error ? body.error : "FileXfer に接続できませんでした。");
+        var error = new Error(body && body.error ? body.error : "FileXfer につながりませんでした。");
         error.status = response.ok ? 502 : response.status;
         throw error;
       }

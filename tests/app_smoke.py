@@ -34,7 +34,7 @@ try:
         page=browser.new_page(service_workers='block');errors=[];page.on('pageerror',lambda error:errors.append(str(error)))
         page.goto(origin);expect(page.locator('#opticalFiles .file-row')).to_have_count(1)
         assert page.title()=='FileXfer' and page.locator('[data-page-panel]').count()==1
-        assert page.locator('[data-transfer-format]').count()==1
+        assert page.locator('[data-transfer-format]').count()==0  # the selected files are sent as they are
         with page.expect_response('**/api/optical/start') as reply:page.click('#showQr')
         transfer=reply.value.json();assert transfer['token']
         expect(page.locator('#qrOverlay')).to_be_visible();expect(page.locator('#qrProgress')).to_contain_text('表示')

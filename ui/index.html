@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="ja" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<title>FileXfer</title>
+<link rel="icon" href="icon.png">
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<div class="app" id="app">
+  <aside class="sidebar" id="sidebar">
+    <div class="brand">FileXfer</div>
+    <nav class="nav" aria-label="画面">
+      <button class="nav-row is-active" type="button" id="navSend" data-view="send">送る</button>
+      <button class="nav-row" type="button" id="navReceive" data-view="receive">受け取る</button>
+      <button class="nav-row" type="button" id="navPhone" data-view="phone">スマホ<span class="nav-count" id="phoneCount" hidden></span></button>
+    </nav>
+    <div class="sidebar-foot">
+      <button class="nav-row" type="button" id="themeButton">ライトにする</button>
+    </div>
+  </aside>
+  <div class="resizer" id="resizer" role="separator" aria-orientation="vertical" aria-label="サイドバーの幅"></div>
+
+  <main class="card">
+    <!-- 送る -->
+    <section class="view" data-panel="send">
+      <header class="card-head"><h1>送る</h1></header>
+      <div class="view-body">
+        <div class="pane">
+          <div class="toolbar">
+            <button class="btn" type="button" id="pickFiles">ファイルを選ぶ</button>
+            <button class="btn" type="button" id="pickFolder">フォルダを選ぶ</button>
+            <span class="path" id="sourcePath"></span>
+          </div>
+          <div class="table">
+            <div class="thead">
+              <button class="check-cell" type="button" id="selectAll" role="checkbox" aria-checked="false" aria-label="すべて選ぶ"><span class="check"></span></button>
+              <span class="c-name">名前</span><span class="c-size">サイズ</span><span class="c-date">更新日時</span>
+            </div>
+            <div class="tbody" id="fileList"></div>
+            <div class="empty" id="fileEmpty">ファイルかフォルダを選んでください</div>
+          </div>
+        </div>
+        <div class="side">
+          <h2 class="label">送り方</h2>
+          <div class="field"><span class="field-name">1 枚の量</span>
+            <button class="select" type="button" id="frameBytes" data-menu="frameBytes"><span class="select-value"></span><span class="chevron"></span></button></div>
+          <div class="field"><span class="field-name">1 秒の枚数</span>
+            <button class="select" type="button" id="frameRate" data-menu="frameRate"><span class="select-value"></span><span class="chevron"></span></button></div>
+          <div class="field"><span class="field-name">誤り訂正</span>
+            <span class="seg" id="ecGroup"><button type="button" data-ec="L">L</button><button type="button" data-ec="M">M</button><button type="button" data-ec="Q">Q</button><button type="button" data-ec="H">H</button></span></div>
+          <div class="field"><span class="field-name">QR の大きさ</span>
+            <span class="stepper"><button type="button" class="step" id="qrSmaller" aria-label="小さくする"></button><span class="step-value" id="qrSizeValue"></span><button type="button" class="step plus" id="qrLarger" aria-label="大きくする"></button></span></div>
+        </div>
+      </div>
+      <footer class="card-foot">
+        <span class="summary" id="sendSummary"></span>
+        <span class="actions">
+          <button class="btn wide" type="button" id="phoneShowQr">スマホに QR を出す</button>
+          <button class="btn primary wide" type="button" id="showQr">この画面に QR を出す</button>
+        </span>
+      </footer>
+    </section>
+
+    <!-- 受け取る -->
+    <section class="view" data-panel="receive" hidden>
+      <header class="card-head"><h1>受け取る</h1></header>
+      <div class="view-body">
+        <div class="pane">
+          <div class="preview" id="preview">
+            <img class="preview-image" id="previewImage" alt="">
+            <span class="preview-idle" id="previewIdle">カメラは止まっています</span>
+            <div class="hint" id="quietHint" hidden><span>QR が映っていません</span><button class="link" type="button" id="tipsButton">読めないとき</button></div>
+          </div>
+          <div class="meter">
+            <div class="meter-row"><span class="meter-state" id="receiveState">待っています</span><span class="meter-eta" id="receiveEta"></span></div>
+            <div class="bar"><span class="bar-fill" id="receiveBar"></span></div>
+            <div class="meter-row sub"><span id="receiveBlocks"></span><span id="receiveRate"></span></div>
+          </div>
+          <div class="result" id="receiveResult" hidden>
+            <span class="result-text" id="receiveResultText"></span>
+            <button class="btn" type="button" id="openReceived">フォルダを開く</button>
+          </div>
+        </div>
+        <div class="side">
+          <h2 class="label">カメラ</h2>
+          <div class="field" id="cameraField"><span class="field-name">使うカメラ</span>
+            <button class="select" type="button" id="cameraSelect" data-menu="camera"><span class="select-value"></span><span class="chevron"></span></button></div>
+          <div class="field"><span class="field-name">撮影幅</span>
+            <span class="seg" id="widthGroup"><button type="button" data-width="960">960</button><button type="button" data-width="1280">1280</button><button type="button" data-width="1920">1920</button></span></div>
+          <div class="field"><span class="field-name">撮影 fps</span>
+            <span class="seg" id="fpsGroup"><button type="button" data-fps="30">30</button><button type="button" data-fps="60">60</button></span></div>
+          <div class="field"><span class="field-name">読み取りの並列数</span>
+            <span class="seg" id="workersGroup"><button type="button" data-workers="1">1</button><button type="button" data-workers="2">2</button><button type="button" data-workers="3">3</button></span></div>
+          <h2 class="label gap">保存</h2>
+          <div class="field"><span class="field-name">終わったらフォルダを開く</span>
+            <button class="switch" type="button" id="openWhenDone" role="switch" aria-checked="true"></button></div>
+          <div class="field column"><span class="field-name">保存先</span>
+            <span class="field-path"><span class="path" id="outputPath"></span><button class="btn small" type="button" id="openOutput">開く</button></span></div>
+        </div>
+      </div>
+      <footer class="card-foot">
+        <span class="summary" id="receiveSummary"></span>
+        <span class="actions">
+          <button class="btn wide" type="button" id="phoneReadCamera">スマホのカメラで読む</button>
+          <button class="btn primary wide" type="button" id="cameraButton">この PC のカメラで読む</button>
+        </span>
+      </footer>
+    </section>
+
+    <!-- スマホ -->
+    <section class="view" data-panel="phone" hidden>
+      <header class="card-head"><h1>スマホ</h1></header>
+      <div class="view-body scroll">
+        <div class="phone">
+          <div class="pair">
+            <div class="pair-qr"><img id="pairQr" alt=""></div>
+            <div class="pair-text">
+              <p class="pair-lead" id="pairLead"></p>
+              <span class="pair-url" id="pairUrl"></span>
+              <span class="pair-actions"><button class="btn small" type="button" id="copyUrl">URL をコピー</button></span>
+            </div>
+          </div>
+          <h2 class="label gap">つながっているスマホ</h2>
+          <div class="list" id="remoteList"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- QR を出している間 -->
+<div class="present" id="present" hidden>
+  <div class="present-qr" id="presentFrame"><img id="presentImage" alt=""></div>
+  <div class="present-bar" id="presentBar">
+    <span class="stepper"><button type="button" class="step" id="presentSmaller" aria-label="小さくする"></button><span class="step-value" id="presentSize"></span><button type="button" class="step plus" id="presentLarger" aria-label="大きくする"></button></span>
+    <button class="btn wide" type="button" id="stopQr">送るのをやめる</button>
+  </div>
+</div>
+
+<div class="layer" id="menuLayer"></div>
+
+<div class="dialog-back" id="confirmDialog" hidden>
+  <div class="dialog" role="dialog" aria-labelledby="confirmTitle">
+    <h2 class="dialog-title" id="confirmTitle"></h2>
+    <p class="dialog-text" id="confirmText"></p>
+    <div class="dialog-actions"><button class="btn wide" type="button" id="confirmCancel">やめる</button><button class="btn primary wide" type="button" id="confirmOk">送る</button></div>
+  </div>
+</div>
+
+<div class="dialog-back" id="tipsDialog" hidden>
+  <div class="dialog" role="dialog" aria-labelledby="tipsTitle">
+    <h2 class="dialog-title" id="tipsTitle">読めないとき</h2>
+    <ul class="tips">
+      <li>送る側の「1 枚の量」を 1,465 bytes まで下げます。</li>
+      <li>それでも読めなければ、送る側を 24 fps まで下げます。</li>
+      <li>QR がカメラの視野いっぱいに入るようにして、端末を何かに立てかけます。</li>
+      <li>QR を出している画面の明るさを最大にします。</li>
+    </ul>
+    <div class="dialog-actions"><button class="btn primary wide" type="button" id="tipsClose">閉じる</button></div>
+  </div>
+</div>
+
+<div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>

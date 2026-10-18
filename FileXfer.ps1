@@ -113,22 +113,92 @@ function Get-FileXferCombinedSource {
         [Environment]::NewLine + [Environment]::NewLine + $body
 }
 
-try {
-    $isWindowsPowerShell = $PSVersionTable.PSEdition -eq 'Desktop'
-    $desktopSourceNames = @(
-        'DesktopApp.cs'
-        'DesktopWindow.cs'
-        'WebViewSecurity.cs'
-    )
+# The FileXfer window: MiniUI's engine (runtime\windows-x64) draws ui\index.html, and ui\MiniUI.App.dll beside it
+# runs FileXfer (local server for the phone, QR, camera, file dialogs). Nothing is compiled here.
+function Invoke-FileXferWindow {
+    param([string[]]$Arguments)
 
+    $runtime = Join-Path $PSScriptRoot 'runtime\windows-x64'
+    $ui = Join-Path $PSScriptRoot 'ui'
+    foreach ($file in @('runtime\windows-x64\MiniUI.Bridge.dll', 'runtime\windows-x64\MiniUI.Engine.dll', 'ui\MiniUI.App.dll')) {
+        if (-not (Test-Path -LiteralPath (Join-Path $PSScriptRoot $file) -PathType Leaf)) {
+            throw "FileXfer could not find $file."
+        }
+    }
+
+    # Windows PowerShell does not load a .NET assembly marked as downloaded (Mark of the Web, as in a copy
+    # extracted from a downloaded zip). As the previous launcher did for WebView2, FileXfer then uses its own
+    # copy of the two MiniUI files without the mark.
+    $bridge = Join-Path $runtime 'MiniUI.Bridge.dll'
+    $zone = 0
+    try { $zone = [int][Security.Policy.Zone]::CreateFromUrl('file://' + $bridge).SecurityZone } catch { }
+    if ($zone -ge 3) {
+        $runtime = Get-FileXferUnmarkedRuntime -Runtime $runtime
+        $bridge = Join-Path $runtime 'MiniUI.Bridge.dll'
+    }
+
+    $stateDirectory = Join-Path ([Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::LocalApplicationData)) 'FileXfer\miniui'
+    [void](New-Item -ItemType Directory -Path $stateDirectory -Force)
+
+    [void][Reflection.Assembly]::LoadFrom($bridge)
+    $appArguments = @('--home', $PSScriptRoot) + @($Arguments)
+    $json = '{"root":' + (ConvertTo-Json -InputObject ([string]$ui) -Compress) +
+        ',"stateDir":' + (ConvertTo-Json -InputObject ([string]$stateDirectory) -Compress) +
+        ',"title":"FileXfer","width":1180,"height":800,"arguments":[' +
+        ((@($appArguments) | ForEach-Object { ConvertTo-Json -InputObject ([string]$_) -Compress }) -join ',') + ']}'
+    return [MiniUI.Bridge]::Run((Join-Path $ui 'index.html'), $json)
+}
+
+# MiniUI.Bridge.dll and MiniUI.Engine.dll rewritten under %LOCALAPPDATA%\FileXfer\runtime: a file written from
+# bytes has no zone mark (Copy-Item would copy the mark). One folder per pair of files.
+function Get-FileXferUnmarkedRuntime {
+    param([string]$Runtime)
+
+    $names = @('MiniUI.Bridge.dll', 'MiniUI.Engine.dll')
+    $key = ($names | ForEach-Object {
+        $item = Get-Item -LiteralPath (Join-Path $Runtime $_)
+        '{0}:{1}:{2}' -f $_, $item.Length, $item.LastWriteTimeUtc.Ticks
+    }) -join '|'
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $id = ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($key)))).Replace('-', '').Substring(0, 16).ToLowerInvariant()
+    }
+    finally {
+        $sha.Dispose()
+    }
+
+    $target = Join-Path (Get-FileXferCacheBase) ('FileXfer\runtime\' + $id)
+    $ready = Join-Path $target 'complete'
+    if (-not (Test-Path -LiteralPath $ready -PathType Leaf)) {
+        [void](New-Item -ItemType Directory -Path $target -Force)
+        foreach ($name in $names) {
+            $source = Join-Path $Runtime $name
+            $copy = Join-Path $target $name
+            try {
+                [IO.File]::WriteAllBytes($copy, [IO.File]::ReadAllBytes($source))
+            }
+            catch [IO.IOException] {
+                # Another FileXfer started at the same moment and already uses the copy.
+                if (-not (Test-Path -LiteralPath $copy -PathType Leaf) -or
+                    (Get-Item -LiteralPath $copy).Length -ne (Get-Item -LiteralPath $source).Length) {
+                    throw
+                }
+            }
+        }
+        [IO.File]::WriteAllText($ready, $key, [Text.Encoding]::ASCII)
+    }
+    return $target
+}
+
+# --no-browser runs only the local HTTP server: the C# sources are compiled by this PowerShell.
+function Invoke-FileXferServer {
+    param([string[]]$Arguments)
+
+    $isWindowsPowerShell = $PSVersionTable.PSEdition -eq 'Desktop'
     $sourceDirectory = Join-Path $PSScriptRoot 'src'
     $sourceFiles = if (Test-Path -LiteralPath $sourceDirectory -PathType Container) {
-        @(Get-ChildItem -LiteralPath $sourceDirectory -Filter '*.cs' -File -Recurse |
-            Where-Object {
-                $isWindowsPowerShell -or
-                    $desktopSourceNames -notcontains $_.Name
-            } |
-            Sort-Object FullName)
+        @(Get-ChildItem -LiteralPath $sourceDirectory -Filter '*.cs' -File -Recurse | Sort-Object FullName)
     }
     else {
         @()
@@ -145,44 +215,12 @@ try {
         @()
     }
     $libraryDirectory = Join-Path $PSScriptRoot 'lib'
-    $libraryFiles = if (Test-Path -LiteralPath $libraryDirectory -PathType Container) {
-        @(Get-ChildItem -LiteralPath $libraryDirectory -File | Sort-Object Name)
-    }
-    else {
-        @()
-    }
     $zxingPath = Join-Path $libraryDirectory 'zxing.dll'
     if (-not (Test-Path -LiteralPath $zxingPath -PathType Leaf)) {
         throw "FileXfer could not find lib\zxing.dll."
     }
 
-    $webViewAssemblies = @()
-    if ($isWindowsPowerShell) {
-        Add-Type -AssemblyName PresentationFramework
-        Add-Type -AssemblyName PresentationCore
-        Add-Type -AssemblyName WindowsBase
-        Add-Type -AssemblyName System.Xaml
-        Add-Type -AssemblyName System.Drawing
-
-        $env:Path = $libraryDirectory + [IO.Path]::PathSeparator + $env:Path
-        $webViewAssemblies = @(
-            (Join-Path $libraryDirectory 'Microsoft.Web.WebView2.Core.dll')
-            (Join-Path $libraryDirectory 'Microsoft.Web.WebView2.Wpf.dll')
-        )
-        foreach ($webViewAssembly in $webViewAssemblies) {
-            if (-not (Test-Path -LiteralPath $webViewAssembly -PathType Leaf)) {
-                throw "Required WebView2 assembly is missing: $webViewAssembly"
-            }
-
-            # Read the bytes instead of using LoadFrom. A zip-downloaded copy
-            # can carry Mark of the Web, which makes LoadFrom fail with
-            # HRESULT 0x80131515 on Windows PowerShell 5.1.
-            [Reflection.Assembly]::Load(
-                [IO.File]::ReadAllBytes($webViewAssembly)) | Out-Null
-        }
-    }
-
-    $buildFiles = @($sourceFiles) + @($webFiles) + @($libraryFiles)
+    $buildFiles = @($sourceFiles) + @($webFiles) + @(Get-Item -LiteralPath $zxingPath)
     $runtimeKey = Get-FileXferRuntimeKey
     $sourceHash = Get-FileXferSourceHash -SourceFiles $buildFiles -RuntimeKey $runtimeKey
     $cacheRoot = Join-Path (Get-FileXferCacheBase) 'FileXfer\add-type-cache-v1'
@@ -202,16 +240,12 @@ try {
                 Add-Type -AssemblyName System.IO.Compression
                 Add-Type -AssemblyName System.IO.Compression.FileSystem
                 $references = @(
-                    [System.Windows.Window].Assembly.Location
-                    [System.Windows.UIElement].Assembly.Location
-                    [System.Windows.DependencyObject].Assembly.Location
-                    [System.Xaml.XamlReader].Assembly.Location
                     'System.Drawing'
                     'System.IO.Compression'
                     'System.IO.Compression.FileSystem'
                     'System.Xml'
                     $zxingPath
-                ) + $webViewAssemblies
+                )
                 Add-Type -TypeDefinition $source `
                     -OutputAssembly $temporaryAssembly `
                     -OutputType Library `
@@ -251,8 +285,22 @@ try {
     [void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes($zxingPath))
     [void][Reflection.Assembly]::LoadFrom($assemblyPath)
     $env:FileXfer_BUILD_ID = $sourceHash
-    $exitCode = [FileXfer.Program]::Run($PSScriptRoot, [string[]]$FileXferArguments)
-    exit $exitCode
+    return [FileXfer.Program]::Run($PSScriptRoot, [string[]]$Arguments)
+}
+
+try {
+    $arguments = @($FileXferArguments | Where-Object { $null -ne $_ })
+    $onWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+    if (-not $onWindows -or $arguments -contains '--no-browser' -or $arguments -contains '--help' -or $arguments -contains '-h') {
+        exit (Invoke-FileXferServer -Arguments $arguments)
+    }
+
+    $exitCode = Invoke-FileXferWindow -Arguments $arguments
+    if ($exitCode -ne 0) {
+        Write-FileXferLauncherLog 'ERROR' ("MiniUI ended with exit code {0}" -f $exitCode)
+        exit $startupFailureExitCode
+    }
+    exit 0
 }
 catch {
     $location = ''

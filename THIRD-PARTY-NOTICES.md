@@ -1,6 +1,6 @@
 # 第三者ソフトウェアの表示 / Third-party notices
 
-FileXfer は、次の第三者ソフトウェアを基礎とするか、実行時に同梱しています。
+FileXfer は、次の第三者ソフトウェアと書体を基礎とするか、同梱しています。
 
 ## Decimen Optical Transfer
 
@@ -36,11 +36,35 @@ v0.3.0 の fork です。上流のワイヤーフォーマットには手を入�
 - License: Apache License 2.0
 - ライセンス全文: [`lib/LICENSE-zxing-cpp.txt`](lib/LICENSE-zxing-cpp.txt)
 
-## Microsoft Edge WebView2
+## MiniUI
 
-WPF のデスクトップ画面に Microsoft.Web.WebView2 1.0.3856.49 の再配布 DLL 3本を同梱しています。
+デスクトップの画面は kit の MiniUI で表示します。Windows では `runtime/windows-x64/MiniUI.Engine.dll` と
+`MiniUI.Bridge.dll` を同梱し、Linux では MiniUI のソースから一緒にビルドします。
+MiniUI 自身の権利表示は MiniUI リポジトリの `THIRD-PARTY-NOTICES.md` にあります。
 
-- Project: [Microsoft Edge WebView2](https://developer.microsoft.com/microsoft-edge/webview2/)
-- Copyright (C) Microsoft Corporation. All rights reserved.
-- ライセンス全文: [`lib/LICENSE-Microsoft.Web.WebView2.txt`](lib/LICENSE-Microsoft.Web.WebView2.txt)
-- 第三者表示: [`lib/NOTICE-Microsoft.Web.WebView2.txt`](lib/NOTICE-Microsoft.Web.WebView2.txt)
+## .NET ランタイム
+
+`runtime/windows-x64/MiniUI.Engine.dll` と `ui/MiniUI.App.dll` は Native AOT で作るため、
+.NET 9 ランタイムライブラリの一部を含みます。
+
+- Project: [dotnet/runtime](https://github.com/dotnet/runtime)
+- License: MIT
+- Copyright (c) .NET Foundation and Contributors
+
+## Inter
+
+画面の欧文書体として `ui/fonts/Inter-*.ttf` を同梱しています。
+
+- Project: [rsms/inter](https://github.com/rsms/inter)
+- License: SIL Open Font License 1.1
+- Copyright (c) 2016 The Inter Project Authors
+- ライセンス全文: [`ui/fonts/LICENSE-Inter.txt`](ui/fonts/LICENSE-Inter.txt)
+
+## Noto Sans JP
+
+画面の和文書体として `ui/fonts/NotoSansJP-*.otf` を同梱しています。
+
+- Project: [notofonts/noto-cjk](https://github.com/notofonts/noto-cjk)
+- License: SIL Open Font License 1.1
+- © 2014-2021 Adobe (http://www.adobe.com/)
+- ライセンス全文: [`ui/fonts/LICENSE-NotoSansJP.txt`](ui/fonts/LICENSE-NotoSansJP.txt)

@@ -2,14 +2,14 @@
   "id": "/",
   "name": "FileXfer",
   "short_name": "FileXfer",
-  "description": "PC のフォルダを画面とカメラで運ぶリモコン",
+  "description": "PC のファイルを QR とカメラで送る・受け取る",
   "lang": "ja",
   "start_url": "/?v=__FileXfer_BUILD_ID__#optical",
   "scope": "/",
   "display": "standalone",
   "orientation": "any",
-  "background_color": "#f2f2f7",
-  "theme_color": "#f2f2f7",
+  "background_color": "#1c1d1f",
+  "theme_color": "#1c1d1f",
   "icons": [
     {
       "src": "/icon.svg?v=__FileXfer_BUILD_ID__",

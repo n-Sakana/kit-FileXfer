@@ -15,10 +15,12 @@ MiniUI ホストをビルドして起動します。MiniUI ソースの既定の
 ./FileXfer.sh
 ```
 
-出力は `artifacts/miniui-linux/FileXfer.dll` です。
+出力は `artifacts/miniui-linux/FileXfer.dll` です。画面はこのリポジトリの `ui/`（Windows と同じもの）です。
 `--path`、`--mode optical`、`--port`、`--no-browser` と、MiniUI 固有の
-`--data-dir`、`--font-dir`、`--duration-ms`、`--screenshot`、`--mcp` を利用できます。
-保存先は `--data-dir` で指定できます。カメラは `FileXfer_CAMERA_DEVICE=/dev/videoN` で選びます。
+`--state-dir`、`--font-dir`、`--duration-ms`、`--screenshot`、`--mcp` を利用できます。
+受け取ったファイルはリポジトリの `output` に保存します。`--output` で変えられます。
+カメラは ffmpeg で読み込みます。`FileXfer_CAMERA_DEVICE=/dev/videoN` で選べます。
+起動するとき、Windows と同じく `tailscale serve` で HTTPS の 10000 番をこのアプリにつなぎます。
 
 MiniUI を使わず、ブラウザで光学転送の画面を開く場合は次を使います。
 

@@ -7,7 +7,7 @@ if [[ -f "$FileXfer_host/FileXfer.dll" ]]; then
     echo 'FileXfer: .NET 9 runtime is missing. On NixOS use: ./tools/linux/run-nixos.sh' >&2
     exit 1
   fi
-  exec dotnet "$FileXfer_host/FileXfer.dll" "$@"
+  exec dotnet "$FileXfer_host/FileXfer.dll" --home "$FileXfer_root" "$@"
 fi
 echo 'FileXfer MiniUI is not built. Run ./tools/linux/build.sh or ./tools/linux/run-nixos.sh on NixOS.' >&2
 exit 1

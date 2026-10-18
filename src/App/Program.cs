@@ -170,22 +170,8 @@ namespace FileXfer
 
                     if (!options.NoBrowser)
                     {
-                        if (PlatformInfo.IsWindows)
-                        {
-                            RunDesktopWindow(
-                                appDirectory,
-                                new Uri(string.Format(
-                                    "http://127.0.0.1:{0}/",
-                                    options.Port)),
-                                shutdown.Token,
-                                shutdown.Cancel);
-                            shutdown.Cancel();
-                        }
-                        else
-                        {
-                            Console.WriteLine(
-                                "The WPF desktop window is available on Windows only; the HTTP server will remain running.");
-                        }
+                        Console.WriteLine(
+                            "The FileXfer window opens from FileXfer.vbs or ./FileXfer; the HTTP server will remain running.");
                     }
 
                     serverTask.GetAwaiter().GetResult();
@@ -203,60 +189,7 @@ namespace FileXfer
             return 0;
         }
 
-        private static void RunDesktopWindow(
-            string appDirectory,
-            Uri appUri,
-            CancellationToken shutdownToken,
-            Action requestShutdown)
-        {
-            Type desktopApp = typeof(Program).Assembly.GetType(
-                "FileXfer.DesktopApp",
-                false);
-            if (desktopApp == null)
-            {
-                throw new InvalidOperationException(
-                    "The FileXfer WPF desktop host is unavailable. Start FileXfer with Windows PowerShell 5.1, or use --no-browser for server-only operation.");
-            }
-
-            MethodInfo run = desktopApp.GetMethod(
-                "Run",
-                BindingFlags.Public | BindingFlags.Static,
-                null,
-                new[]
-                {
-                    typeof(string),
-                    typeof(Uri),
-                    typeof(CancellationToken),
-                    typeof(Action)
-                },
-                null);
-            if (run == null)
-            {
-                throw new MissingMethodException(
-                    "FileXfer.DesktopApp.Run could not be found.");
-            }
-
-            try
-            {
-                run.Invoke(
-                    null,
-                    new object[]
-                    {
-                        Path.GetFullPath(appDirectory),
-                        appUri,
-                        shutdownToken,
-                        requestShutdown
-                    });
-            }
-            catch (TargetInvocationException exception)
-            {
-                throw new InvalidOperationException(
-                    "The FileXfer WPF desktop host failed.",
-                    exception.InnerException ?? exception);
-            }
-        }
-
-        private static bool TryFindRunningFileXfer(
+        internal static bool TryFindRunningFileXfer(
             int port,
             string appDirectory,
             out int processId,
@@ -451,7 +384,7 @@ namespace FileXfer
             return false;
         }
 
-        private static bool TryStopRunningFileXfer(
+        internal static bool TryStopRunningFileXfer(
             int port,
             int processId,
             out string error)

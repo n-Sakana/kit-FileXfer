@@ -10,7 +10,7 @@
     <NoWarn>$(NoWarn);CA1416</NoWarn>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="../src/**/*.cs" Exclude="../src/App/DesktopApp.cs;../src/App/DesktopWindow.cs;../src/App/WebViewSecurity.cs" />
+    <Compile Include="../src/**/*.cs" />
     <Compile Include="RegressionTests.cs" />
     <Reference Include="zxing"><HintPath>../lib/zxing.dll</HintPath><Private>true</Private></Reference>
   </ItemGroup>

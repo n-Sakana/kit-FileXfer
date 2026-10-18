@@ -24,4 +24,15 @@ JavaScript は20件です。ブラウザ回帰試験は実 WASM と合成 QR／�
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\test-desktop-context.ps1
 ```
 
-`FileXfer.MiniUI.Probe.csproj` は別途 MiniUI ソースを必要とする既存のネイティブ試験です。
+デスクトップの画面とネイティブ部品は次で確認します。どちらも隣のフォルダの miniUI ソースを使います。
+
+```bash
+dotnet run --project tests/FileXfer.MiniUI.Probe.csproj -c Release
+python tests/ui_drive.py               # Windows: runtime/windows-x64 と ui/MiniUI.App.dll を使う
+python3 tests/ui_drive.py --linux      # Linux: ./FileXfer.sh を使う
+```
+
+`FileXfer.MiniUI.Probe.csproj` は、画面に出す QR（QrStream と ScaledQr）をカメラ相当の画像に置いて
+デスクトップの受信処理（CameraReceiver）に渡し、受け取ったファイルが元と一致することを確かめます。
+`ui_drive.py` は MiniUI の MCP で画面を操作し、送る・受け取る・スマホ・QR 表示をライトとダークで
+`tests/results/screens` に保存します。

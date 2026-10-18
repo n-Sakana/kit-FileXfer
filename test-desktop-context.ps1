@@ -32,8 +32,24 @@ Assert-True (@($removeLines | Where-Object { $_.StartsWith('[-HKEY_CURRENT_USER\
 foreach ($context in $script:Contexts) {
     Assert-True ($removeLines -contains ('[-' + $context + '\FileXfer]')) 'Removal targets another application.'
 }
+# The kit's shared uninstaller: dot-sourcing loads its functions without touching the registry.
+$installContexts = @($script:Contexts)
 $uninstall = [IO.File]::ReadAllText((Join-Path $root 'common/uninstall.ps1'))
-Assert-True ($uninstall.Contains('Build-RegistryLines $false')) 'Uninstall must use the same key definitions.'
+. (Join-Path $root 'common/uninstall.ps1')
+Assert-True ($script:OwnKey -eq 'FileXfer') 'Uninstall must know its own key.'
+Assert-True (@($script:Contexts).Count -eq $installContexts.Count) 'Uninstall must look at the four contexts.'
+foreach ($context in $script:Contexts) {
+    Assert-True ($installContexts -contains ('HKEY_CURRENT_USER\' + $context.Path)) ('Uninstall looks outside the install contexts: ' + $context.Path)
+}
+Assert-RegistrationPath 'Software\Classes\Directory\shell\FileXfer'
+foreach ($outside in @('Software\Microsoft\Windows\CurrentVersion\Run\FileXfer', 'Software\Classes\Directory\shell\FileXfer\command', 'Software\Classes\Directory\shell')) {
+    $refused = $false
+    try { Assert-RegistrationPath $outside } catch { $refused = $true }
+    Assert-True $refused ('Uninstall must refuse ' + $outside)
+}
+Assert-True ($uninstall -notmatch 'HKLM|HKEY_LOCAL_MACHINE|LocalMachine') 'Uninstall must stay in HKCU.'
+$removal = $uninstall.Substring($uninstall.IndexOf('function Invoke-Removal'))
+Assert-True ($removal.IndexOf('Backup-Registration') -ge 0 -and $removal.IndexOf('Backup-Registration') -lt $removal.IndexOf('Remove-Registration')) 'Uninstall must back up before removing.'
 $originalItems = $script:MenuItems
 try {
     $script:MenuItems = @(1..17)
