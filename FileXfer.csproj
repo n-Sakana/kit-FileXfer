@@ -28,6 +28,7 @@
     <EmbeddedResource Include="web/app.css" LogicalName="FileXfer.Web.app.css" />
     <EmbeddedResource Include="web/optical-core.js" LogicalName="FileXfer.Web.optical-core.js" />
     <EmbeddedResource Include="web/zxing-reader.js" LogicalName="FileXfer.Web.zxing-reader.js" />
+    <EmbeddedResource Include="web/diagnostics.js" LogicalName="FileXfer.Web.diagnostics.js" />
     <EmbeddedResource Include="web/app.js" LogicalName="FileXfer.Web.app.js" />
     <EmbeddedResource Include="web/qr-worker.js" LogicalName="FileXfer.Web.qr-worker.js" />
     <EmbeddedResource Include="web/zxing_reader-EOacYbLr.wasm" LogicalName="FileXfer.Web.zxing_reader-EOacYbLr.wasm" />

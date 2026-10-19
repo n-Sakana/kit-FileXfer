@@ -27,6 +27,9 @@ namespace FileXfer
             receiverId = RequireReceiverId(receiverId);
             lock (_gate)
             {
+                OpticalReceiveState previous;
+                _receivers.TryGetValue(receiverId, out previous);
+                Diagnostics.Event("receive.reset", Diagnostics.Id(receiverId), new { Previous = previous == null ? null : previous.TransferId });
                 _receivers.Remove(receiverId);
                 _stopped.Remove(receiverId);
             }
@@ -37,6 +40,12 @@ namespace FileXfer
             receiverId = RequireReceiverId(receiverId);
             lock (_gate)
             {
+                OpticalReceiveState ended;
+                _receivers.TryGetValue(receiverId, out ended);
+                Diagnostics.Event("receive.stopped", Diagnostics.Id(receiverId), new {
+                    Transfer = ended == null ? null : ended.TransferId,
+                    Complete = ended != null && ended.CompletedResult != null,
+                    Solved = ended == null || ended.Decoder == null ? 0 : ended.Decoder.SolvedCount });
                 _receivers.Remove(receiverId);
                 if (_stopped.Count >= 256)
                 {
@@ -61,12 +70,16 @@ namespace FileXfer
             OpticalFrame frame;
             if (!OpticalFrame.TryParse(bytes, out frame))
             {
+                Diagnostics.Sample("receive.reject.invalid", Diagnostics.Id(receiverId), 0, null);
                 return OpticalReceiveResult.NotRecognized();
             }
 
             lock (_gate)
             {
-                if (_stopped.ContainsKey(receiverId)) return OpticalReceiveResult.NotRecognized();
+                if (_stopped.ContainsKey(receiverId)) {
+                    Diagnostics.Sample("receive.reject.stopped", Diagnostics.Id(receiverId), 0, null);
+                    return OpticalReceiveResult.NotRecognized();
+                }
                 OpticalReceiveState state;
                 var expired = new List<string>();
                 foreach (var entry in _receivers)
@@ -74,25 +87,44 @@ namespace FileXfer
                     if (DateTime.UtcNow - entry.Value.LastSeenUtc > TimeSpan.FromMinutes(30))
                         expired.Add(entry.Key);
                 }
-                foreach (var id in expired) _receivers.Remove(id);
+                foreach (var id in expired) {
+                    Diagnostics.Event("receive.expired", _receivers[id].TransferId, new { Receiver = Diagnostics.Id(id) });
+                    _receivers.Remove(id);
+                }
                 if (!_receivers.TryGetValue(receiverId, out state))
                 {
                     if (_receivers.Count >= 16)
                         throw new ArgumentException("受信画面が多すぎます。不要なカメラを停止してください。");
                     state = new OpticalReceiveState(frame);
                     _receivers[receiverId] = state;
+                    Diagnostics.Event("receive.session", state.TransferId, new { Receiver = Diagnostics.Id(receiverId) });
                 }
 
                 state.LastSeenUtc = DateTime.UtcNow;
                 // A delayed worker or a second QR in view must not erase collected blocks.
-                if (!state.Matches(frame)) return OpticalReceiveResult.NotRecognized();
+                if (!state.Matches(frame)) {
+                    Diagnostics.Sample("receive.reject.session", state.TransferId, 0, new { Receiver = Diagnostics.Id(receiverId),
+                        Incoming = Diagnostics.Transfer(frame.SessionId, frame.BlockCount, frame.BlockLength, frame.TotalLength) });
+                    return OpticalReceiveResult.NotRecognized();
+                }
 
                 if (state.CompletedResult != null)
                 {
+                    Diagnostics.Sample("receive.already_complete", state.TransferId, 0, null);
                     return state.CompletedResult;
                 }
 
-                state.Decoder.AddFrame(frame.Sequence, frame.Block);
+                var stamp = Diagnostics.Stamp();
+                var previous = state.Decoder.FramesNew;
+                var solved = state.Decoder.SolvedCount;
+                try { state.Decoder.AddFrame(frame.Sequence, frame.Block); }
+                catch (Exception error) { Diagnostics.Failure("receive.fountain", state.TransferId, error); throw; }
+                if (state.Decoder.SolvedCount != solved) state.LastProgressUtc = DateTime.UtcNow;
+                Diagnostics.Sample(previous == state.Decoder.FramesNew ? "receive.duplicate" : "receive.accepted",
+                    state.TransferId, Diagnostics.Milliseconds(stamp), new { Receiver = Diagnostics.Id(receiverId),
+                        Sequence = frame.Sequence, New = state.Decoder.FramesNew, Duplicate = state.Decoder.FramesDuplicate,
+                        Solved = state.Decoder.SolvedCount, Blocks = frame.BlockCount,
+                        ProgressAgeMs = (DateTime.UtcNow - state.LastProgressUtc).TotalMilliseconds });
                 if (!state.Decoder.IsComplete)
                 {
                     return state.DescribeProgress();
@@ -100,33 +132,44 @@ namespace FileXfer
 
                 try
                 {
+                    Diagnostics.Event("receive.assemble.start", state.TransferId, null);
                     var payload = state.Decoder.Assemble();
+                    Diagnostics.Event("receive.verify.fnv.start", state.TransferId, null);
                     if (Fnv1a(payload) != frame.PayloadFnv)
                     {
                         throw new InvalidDataException(
                             "受信した光学転送の検算に失敗しました。もう一度読み取ってください。");
                     }
 
-                    var saved = OpticalPayloadReader.Save(payload, _outputRoot);
+                    Diagnostics.Event("receive.verify.fnv.ok", state.TransferId, null);
+                    var saved = OpticalPayloadReader.Save(payload, _outputRoot, state.TransferId);
                     string openError = null;
                     if (openWhenDone)
                     {
                         try
                         {
+                            Diagnostics.Event("receive.open_folder.start", state.TransferId, null);
                             OutputLauncher.OpenFolder(saved.OutputPath);
+                            Diagnostics.Event("receive.open_folder.ok", state.TransferId, null);
                         }
                         catch (Exception exception)
                         {
+                            Diagnostics.Failure("receive.open_folder", state.TransferId, exception);
                             openError = exception.Message;
                         }
                     }
 
                     state.CompletedResult = state.DescribeComplete(saved, openError);
+                    Diagnostics.Event("receive.complete", state.TransferId, new { Receiver = Diagnostics.Id(receiverId),
+                        Files = saved.FileCount, Solved = state.Decoder.SolvedCount, New = state.Decoder.FramesNew,
+                        Duplicate = state.Decoder.FramesDuplicate, FinalizeMs = Diagnostics.Milliseconds(stamp),
+                        ElapsedMs = state.CompletedResult.ElapsedSeconds * 1000 });
                     state.ReleaseDecoder();
                     return state.CompletedResult;
                 }
-                catch
+                catch (Exception error)
                 {
+                    Diagnostics.Failure("receive.finalize", state.TransferId, error);
                     _receivers.Remove(receiverId);
                     throw;
                 }
@@ -170,6 +213,7 @@ namespace FileXfer
             _blockLength = firstFrame.BlockLength;
             _totalLength = firstFrame.TotalLength;
             _payloadFnv = firstFrame.PayloadFnv;
+            TransferId = Diagnostics.Transfer(_sessionId, _blockCount, _blockLength, _totalLength);
             _startedUtc = DateTime.UtcNow;
             LastSeenUtc = _startedUtc;
             Decoder = new FountainDecoder(
@@ -179,6 +223,8 @@ namespace FileXfer
                 _totalLength);
         }
 
+        public string TransferId { get; private set; }
+        public DateTime LastProgressUtc = DateTime.UtcNow;
         public DateTime LastSeenUtc { get; set; }
         public void ReleaseDecoder() { Decoder = null; }
         public FountainDecoder Decoder { get; private set; }
@@ -610,16 +656,24 @@ namespace FileXfer
         private const string BundleMediaType = "application/vnd.decimen.bundle+dcb1";
         private static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
 
-        public static OpticalSavedPayload Save(byte[] container, string outputRoot)
+        public static OpticalSavedPayload Save(byte[] container, string outputRoot, string transferId = "")
         {
             string mediaType;
-            var bundle = UnpackFile(container, out mediaType);
+            var stamp = Diagnostics.Stamp();
+            Diagnostics.Event("receive.verify.container.start", transferId, null);
+            var bundle = UnpackFile(container, out mediaType, transferId);
+            Diagnostics.Event("receive.verify.container.ok", transferId, new { Ms = Diagnostics.Milliseconds(stamp) });
             if (!string.Equals(mediaType, BundleMediaType, StringComparison.Ordinal))
             {
                 throw new InvalidDataException("受信した内容は FileXfer のフォルダ転送ではありません。");
             }
 
+            Diagnostics.Event("receive.verify.bundle.start", transferId, null);
+            stamp = Diagnostics.Stamp();
             var parsed = ReadBundle(bundle);
+            Diagnostics.Event("receive.verify.bundle.ok", transferId, new { Ms = Diagnostics.Milliseconds(stamp), Files = parsed.Files.Count });
+            Diagnostics.Event("receive.save.start", transferId, new { Files = parsed.Files.Count });
+            stamp = Diagnostics.Stamp();
             var outputDirectory = OutputLayout.CreateRunDirectory(outputRoot, parsed.Label);
             foreach (var entry in parsed.Files)
             {
@@ -644,13 +698,14 @@ namespace FileXfer
                 File.WriteAllBytes(target, entry.Bytes);
             }
 
+            Diagnostics.Event("receive.save.ok", transferId, new { Ms = Diagnostics.Milliseconds(stamp), Files = parsed.Files.Count });
             return new OpticalSavedPayload(
                 parsed.Label,
                 parsed.Files.Count,
                 outputDirectory);
         }
 
-        private static byte[] UnpackFile(byte[] container, out string mediaType)
+        private static byte[] UnpackFile(byte[] container, out string mediaType, string transferId)
         {
             if (container == null
                 || container.Length < FileHeaderLength
@@ -700,9 +755,11 @@ namespace FileXfer
 
             var transmitted = new byte[transmittedLength];
             Buffer.BlockCopy(container, bodyOffset, transmitted, 0, transmitted.Length);
+            Diagnostics.Event("receive.decompress.start", transferId, new { Compressed = compression == 1, Bytes = transmittedLength });
             var bytes = compression == 1
                 ? Decompress(transmitted, originalLength)
                 : transmitted;
+            Diagnostics.Event("receive.decompress.ok", transferId, new { Bytes = bytes.Length });
             if (bytes.Length != originalLength)
             {
                 throw new InvalidDataException("受信したファイル長がヘッダーと一致しません。");

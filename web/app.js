@@ -48,7 +48,37 @@
     }
   };
 
+  var diag = window.FileXferDiagnostics;
   var opticalCore = window.FileXferOptical;
+  document.addEventListener("click", function (event) {
+    var control = event.target.closest && event.target.closest("button, [role=switch], .file-row");
+    if (!control) return;
+    var name = /^(showQr|closeQr|readLocalCamera|receiveOpenFolder|pickFiles|pickFolder|selectAll|cameraNoSignalHelp|cameraHelpClose)$/.test(control.id)
+      ? control.id : control.closest("#opticalDirection") ? "direction" : control.classList.contains("file-row") ? "selection" : "control";
+    diag.sample("ui.action", name, 0);
+  });
+  document.addEventListener("change", function (event) {
+    var name = event.target.id;
+    if (!/^(frameAmount|frameRate|errorCorrection|cameraWidth|cameraFps|cameraWorkers)$/.test(name)) return;
+    var value = event.target.value;
+    diag.event("ui.setting", name, { value: /^[LMQH]$/.test(value) ? value : Number(value) || 0 });
+  });
+  diag.observe(function () {
+    if (state.opticalRenderer) {
+      var r = state.opticalRenderer;
+      diag.event("send.status", r.session.transferId, { drawn: r.drawn, queued: r.queue.length, pending: r.pendingBatches,
+        nextSequence: r.nextSequence, width: document.getElementById("qrFrame").width });
+    }
+    if (state.cameraStarting || state.cameraRunning) {
+      var now = performance.now(), q = state.cameraUpload;
+      diag.event("camera.status", diag.id(state.cameraReceiverId), { starting: state.cameraStarting,
+        running: state.cameraRunning, captureAgeMs: state.cameraLastCaptureAt ? now - state.cameraLastCaptureAt : null,
+        readAgeMs: state.cameraLastDecodedAt ? now - state.cameraLastDecodedAt : null,
+        frames: state.cameraFrameId, queue: q ? q.queue.length : 0, inFlight: !!(q && q.inFlight), retries: q ? q.failures : 0,
+        workers: state.cameraWorkers.map(function (s) { return { ready: s.ready, failed: s.failed, busy: s.busy,
+          ageMs: s.busy && s.sentAt ? now - s.sentAt : 0 }; }) });
+    }
+  });
   var toast = document.getElementById("toast");
   var toastTimer = null;
   var cameraCanvas = document.createElement("canvas");
@@ -773,7 +803,7 @@
         })
       });
       if (startGeneration !== state.opticalStartGeneration) {
-        fetch("/api/optical/stop", {
+        diag.fetch("/api/optical/stop", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ token: result.token })
         }).catch(function () {});
@@ -857,6 +887,8 @@
   }
 
   function startQrRenderer(session) {
+    diag.event("send.display.start", session.transferId, { fps: session.framesPerSecond, frameBytes: session.frameBytes,
+      blocks: session.sourceBlocks, qrVersion: session.qrVersion });
     var side = 17 + 4 * Number(session.qrVersion) + 8;
     var renderer = {
       session: session, side: side, nextSequence: 0, queue: [],
@@ -874,12 +906,13 @@
       renderer.animationFrame = window.requestAnimationFrame(tick);
       if (now < renderer.nextAt) return;
       var entry = renderer.queue[0];
-      if (!entry || !entry.image) return; // keep the last complete QR visible
+      if (!entry || !entry.image) { diag.sample("send.queue_empty", session.transferId, 0); return; } // keep the last complete QR visible
       renderer.queue.shift();
       pumpQrFrames(renderer);
       drawQrFrame(renderer, entry.image);
       if (!renderer.startedAt) renderer.startedAt = now;
       renderer.drawn++;
+      diag.sample("send.draw", session.transferId, 0, { sequence: entry.sequence, lateMs: Math.max(0, now - renderer.nextAt) });
       if (renderer.drawn === 1 || renderer.retrying) {
         renderer.retrying = false;
         setQrStatus("QR を表示しています", false);
@@ -907,10 +940,12 @@
 
   async function fetchQrBatch(renderer, batch) {
     if (!isCurrentQrRenderer(renderer)) return;
+    var diagnosticEnd = diag.begin("send.batch", renderer.session.transferId);
+    var diagnosticOk = false;
     batch.controller = new AbortController();
     var timeout = window.setTimeout(function () { batch.controller.abort(); }, 10000);
     try {
-      var response = await fetch("/api/optical/frames?token=" + encodeURIComponent(renderer.session.token) +
+      var response = await diag.fetch("/api/optical/frames?token=" + encodeURIComponent(renderer.session.token) +
         "&seq=" + batch.sequence + "&count=" + batch.entries.length,
         { cache: "no-store", signal: batch.controller.signal });
       if (!response.ok) {
@@ -919,6 +954,7 @@
         throw httpError;
       }
       var buffer = await response.arrayBuffer();
+      diagnosticOk = true;
       if (!isCurrentQrRenderer(renderer)) return;
       var frames = opticalCore.unpackFrames(buffer, renderer.side, batch.sequence, batch.entries.length);
       frames.forEach(function (frame, index) {
@@ -935,6 +971,7 @@
         return;
       }
       batch.failures++;
+      diag.sample("send.batch.retry", renderer.session.transferId, 0, { failures: batch.failures, status: error.status || 0 });
       renderer.retrying = true;
       setQrStatus("PC とのつながりを待っています", true);
       batch.retryTimer = window.setTimeout(function () {
@@ -942,6 +979,7 @@
         fetchQrBatch(renderer, batch);
       }, Math.min(3000, 150 * Math.pow(2, Math.min(batch.failures - 1, 5))));
     } finally {
+      diagnosticEnd(response ? response.status : 0, !diagnosticOk);
       window.clearTimeout(timeout);
     }
   }
@@ -1022,6 +1060,7 @@
     var renderer = state.opticalRenderer;
     state.opticalRenderer = null;
     if (renderer) {
+      diag.event("send.display.stop", renderer.session.transferId, { drawn: renderer.drawn, queued: renderer.queue.length });
       renderer.stopped = true;
       window.cancelAnimationFrame(renderer.animationFrame);
       renderer.batches.forEach(function (batch) {
@@ -1041,7 +1080,7 @@
     if (session && unloading === true && navigator.sendBeacon) {
       navigator.sendBeacon("/api/optical/stop", new Blob([JSON.stringify({ token: session.token })], { type: "application/json" }));
     } else if (session) {
-      fetch("/api/optical/stop", {
+      diag.fetch("/api/optical/stop", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ token: session.token })
@@ -1092,6 +1131,7 @@
       return;
     }
 
+    diag.event("camera.request", "", { width: Number(document.getElementById("cameraWidth").value), fps: Number(document.getElementById("cameraFps").value) });
     var captureWidth = Number(document.getElementById("cameraWidth").value || "1280");
     var captureFps = Number(document.getElementById("cameraFps").value || "60");
     var stream = null;
@@ -1122,6 +1162,8 @@
 
       // A unique ID prevents a delayed POST/stop from an earlier start erasing this run.
       state.cameraReceiverId = createRemoteId();
+      var settings = stream.getVideoTracks()[0].getSettings();
+      diag.event("camera.open", diag.id(state.cameraReceiverId), { width: settings.width, height: settings.height, fps: settings.frameRate });
       await requestJson("/api/optical/receive/start", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1155,13 +1197,16 @@
           if (generation === state.cameraGeneration && state.cameraRunning) applyReceiveProgress(result);
         },
         onTransient: function () {
+          diag.sample("relay.retry", diag.id(receiverId), 0);
           if (generation === state.cameraGeneration && state.cameraRunning)
             document.getElementById("receiveState").textContent = "PC とのつながりを待っています";
         },
         onFatal: function (error) {
+          diag.event("relay.failed", diag.id(receiverId), { status: error.status || 0 });
           if (generation === state.cameraGeneration) finishCameraError(errorMessage(error));
         }
       });
+      diag.event("camera.running", diag.id(receiverId));
       startCameraWorkers(generation);
       state.cameraStarting = false;
       state.cameraRunning = true;
@@ -1169,7 +1214,7 @@
       stream.getVideoTracks().forEach(function (track) {
         track.addEventListener("ended", function () {
           if (generation === state.cameraGeneration && state.cameraRunning)
-            finishCameraError("カメラが外れました。つなぎ直して、もう一度読んでください。");
+            { diag.event("camera.track_ended", diag.id(state.cameraReceiverId)); finishCameraError("カメラが外れました。つなぎ直して、もう一度読んでください。"); }
         });
       });
       document.getElementById("cameraPreview").classList.add("is-live");
@@ -1184,6 +1229,7 @@
         stream.getTracks().forEach(function (track) { track.stop(); });
       }
       if (generation === state.cameraGeneration) {
+        diag.event("camera.open.failed", diag.id(state.cameraReceiverId), { type: safeErrorType(error) });
         finishCameraError(cameraErrorMessage(error));
       }
     }
@@ -1244,11 +1290,14 @@
     stopCameraWorkers();
     state.cameraTracking = null;
     var workerCount = Math.max(1, Math.min(3, Number(document.getElementById("cameraWorkers").value || "2")));
+    diag.event("worker.start", diag.id(state.cameraReceiverId), { workers: workerCount });
     for (var index = 0; index < workerCount; index++) {
       (function () {
         var worker = new Worker("/qr-worker.js?v=__FileXfer_BUILD_ID__");
         var slot = { worker: worker, busy: false, failed: false, ready: false, frameId: -1, initTimer: null, region: null };
-        var fail = function (reason) {
+        var fail = function (reason, detail) {
+          diag.event("worker.failed", diag.id(state.cameraReceiverId), { initTimeout: !reason, wasReady: slot.ready,
+            failure: detail || { stage: reason ? "worker.script" : "worker.init_timeout", type: reason ? "WorkerError" : "Timeout", code: 0, site: "app.startCameraWorkers" } });
           window.clearTimeout(slot.initTimer);
           slot.busy = false;
           slot.failed = true;
@@ -1265,15 +1314,23 @@
         worker.onmessage = function (event) {
           if (generation !== state.cameraGeneration || state.cameraWorkers.indexOf(slot) < 0) return;
           var message = event.data || {};
-          if (message.fatal) { fail(message.error); return; }
+          if (message.fatal) { fail(message.error, message.diagnostic); return; }
           if (message.id === -1) {
             window.clearTimeout(slot.initTimer);
             slot.ready = message.ready === true;
-            if (!slot.ready) fail(message.error);
+            diag.event("worker.ready", diag.id(state.cameraReceiverId), { ready: slot.ready });
+            if (!slot.ready) fail(message.error, message.diagnostic);
             return;
           }
           if (message.id !== slot.frameId) return;
           slot.busy = false;
+          diag.sample(message.bytes ? "decode.read" : "decode.miss", diag.id(state.cameraReceiverId), performance.now() - slot.sentAt,
+            { failed: !!message.error, symbols: message.observed ? message.observed.symbols : 0,
+              invalid: message.observed ? message.observed.invalid : 0, foreign: message.observed ? message.observed.foreign : 0 });
+          if (message.observed && message.observed.foreign) diag.sample("decode.foreign", diag.id(state.cameraReceiverId), 0);
+          if (message.observed && message.observed.invalid) diag.sample("decode.non_transfer", diag.id(state.cameraReceiverId), 0);
+          if (message.error) diag.sample("decode.failed", diag.id(state.cameraReceiverId), 0,
+            message.diagnostic || { stage: "decode.unknown", type: "OtherError", code: 0, site: "app.workerMessage" });
           if (!state.cameraRunning) return;
           var bytes = message.bytes ? new Uint8Array(message.bytes) : null;
           var frame = bytes && opticalCore.parseFrame(bytes);
@@ -1288,9 +1345,16 @@
               if (tracking) state.cameraTracking = tracking;
             } else if (state.cameraTracking) state.cameraTracking.misses++;
           }
-          if (frame && state.cameraUpload) state.cameraUpload.push(bytes);
+          if (frame && state.cameraUpload) {
+            var queue = state.cameraUpload;
+            var reason = queue.keys.has(frame.key) ? "duplicate" : queue.queue.length >= 128 ? "full" : "accepted";
+            var accepted = queue.push(bytes);
+            diag.sample("relay." + (accepted ? "accepted" : reason === "accepted" ? "rejected" : reason), diag.transfer(frame.session), 0,
+              { receiver: diag.id(state.cameraReceiverId), sequence: frame.sequence, queued: queue.queue.length });
+          }
         };
-        worker.onerror = fail;
+        worker.onerror = function (error) { fail(error, { stage: "worker.script", type: "WorkerError", code: 0,
+          site: "app.workerError", line: error.lineno || 0, column: error.colno || 0 }); };
         state.cameraWorkers.push(slot);
       })();
     }
@@ -1313,6 +1377,7 @@
       if (generation !== state.cameraGeneration || !state.cameraRunning) {
         return;
       }
+      diag.sample("camera.video_callback", diag.id(state.cameraReceiverId), 0);
       captureCameraFrame(generation);
       scheduleCameraFrame(generation);
     };
@@ -1325,7 +1390,7 @@
 
   function captureCameraFrame(generation) {
     var slot = state.cameraWorkers.find(function (candidate) { return candidate.ready && !candidate.busy && !candidate.failed; });
-    if (!slot) return;
+    if (!slot) { diag.sample("camera.no_worker", diag.id(state.cameraReceiverId), 0); return; }
     var video = document.getElementById("cameraVideo");
     var width = video.videoWidth, height = video.videoHeight;
     if (!width || !height) return;
@@ -1344,6 +1409,8 @@
       context.drawImage(video, region.x, region.y, region.width, region.height, 0, 0, region.width, region.height);
       var image = context.getImageData(0, 0, region.width, region.height);
       slot.busy = true;
+      slot.sentAt = performance.now();
+      diag.sample("camera.capture", diag.id(state.cameraReceiverId), slot.sentAt - now, { width: width, height: height, cropWidth: region.width, cropHeight: region.height, full: region.full });
       slot.frameId = frameId;
       slot.region = region;
       slot.videoWidth = width;
@@ -1357,6 +1424,10 @@
   }
 
   function applyReceiveProgress(result) {
+    diag.sample("relay.progress", diag.id(state.cameraReceiverId), 0, result ? {
+      recognized: result.recognized, complete: result.complete, solved: result.solvedBlocks, blocks: result.sourceBlocks,
+      received: result.framesCollected, duplicates: result.duplicateFrames, elapsedSeconds: result.elapsedSeconds
+    } : null);
     if (!result || !result.recognized || state.cameraComplete) {
       return;
     }
@@ -1391,6 +1462,7 @@
       return;
     }
 
+    diag.event("receive.complete", diag.id(state.cameraReceiverId), { files: result.fileCount, bytes: result.totalBytes });
     state.cameraComplete = true;
     document.getElementById("receiveProgressBar").style.width = "100%";
     document.getElementById("receiveProgressBar").classList.add("is-done");
@@ -1410,6 +1482,7 @@
   }
 
   function stopCamera(clearServer, keepLabel) {
+    if (state.cameraStarting || state.cameraRunning) diag.event("camera.stop", diag.id(state.cameraReceiverId), { complete: state.cameraComplete, clearServer: !!clearServer });
     state.cameraGeneration++;
     if (state.cameraUpload) state.cameraUpload.stop();
     state.cameraUpload = null;
@@ -1438,7 +1511,7 @@
       setCameraLabel("カメラは止まっています");
     }
     if (clearServer && state.cameraReceiverId) {
-      fetch("/api/optical/receive/stop", {
+      diag.fetch("/api/optical/receive/stop", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ receiverId: state.cameraReceiverId })
@@ -1448,6 +1521,7 @@
   }
 
   function finishCameraError(message) {
+    diag.event("camera.failed", diag.id(state.cameraReceiverId));
     stopCamera(true, true);
     setCameraLabel(message);
     document.getElementById("receiveState").textContent = "止まりました";
@@ -1867,7 +1941,14 @@
     });
   }
 
+  function safeErrorType(error) {
+    var name = error && error.name;
+    return /^(NotAllowedError|NotFoundError|NotReadableError|OverconstrainedError|AbortError|TypeError|SecurityError|RuntimeError)$/.test(name) ? name : "OtherError";
+  }
+
   async function requestJson(url, options, timeoutMs) {
+    var diagnosticEnd = diag.begin("http.body", diag.route(url));
+    var diagnosticOk = false;
     var settings = Object.assign({}, options || {});
     var controller = timeoutMs ? new AbortController() : null;
     var originalSignal = settings.signal;
@@ -1882,7 +1963,7 @@
       timer = window.setTimeout(function () { controller.abort(); }, timeoutMs);
     }
     try {
-      var response = await fetch(url, settings);
+      var response = await diag.fetch(url, settings);
       var body;
       try { body = await response.json(); } catch (_) { body = null; }
       if (!response.ok || body === null) {
@@ -1890,8 +1971,10 @@
         error.status = response.ok ? 502 : response.status;
         throw error;
       }
+      diagnosticOk = true;
       return body;
     } finally {
+      diagnosticEnd(response ? response.status : 0, !diagnosticOk);
       window.clearTimeout(timer);
       if (originalSignal && controller) originalSignal.removeEventListener("abort", forwardAbort);
     }

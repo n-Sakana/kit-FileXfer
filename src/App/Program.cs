@@ -19,6 +19,7 @@ namespace FileXfer
 
         public static int Run(string appDirectory, string[] args)
         {
+            Diagnostics.Event("app.start", "http", null);
             Console.OutputEncoding = new UTF8Encoding(false);
 
             AppOptions options;
@@ -28,6 +29,7 @@ namespace FileXfer
             }
             catch (ArgumentException exception)
             {
+                Diagnostics.Failure("app.start", "http", exception);
                 Console.Error.WriteLine(exception.Message);
                 Console.Error.WriteLine("Use --help to see the available options.");
                 return 2;
@@ -84,16 +86,19 @@ namespace FileXfer
             }
             catch (ArgumentException exception)
             {
+                Diagnostics.Failure("app.start", "http", exception);
                 Console.Error.WriteLine(exception.Message);
                 return 2;
             }
             catch (DirectoryNotFoundException exception)
             {
+                Diagnostics.Failure("app.start", "http", exception);
                 Console.Error.WriteLine(exception.Message);
                 return 2;
             }
             catch (IOException exception)
             {
+                Diagnostics.Failure("app.start", "http", exception);
                 Console.Error.WriteLine(exception.Message);
                 return 2;
             }
@@ -113,6 +118,7 @@ namespace FileXfer
                 }
                 catch (Exception exception)
                 {
+                    Diagnostics.Failure("server.start", "http", exception);
                     Console.Error.WriteLine(
                         "FileXfer could not listen on localhost:{0}: {1}",
                         options.Port,

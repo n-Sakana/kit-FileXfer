@@ -79,7 +79,7 @@ namespace FileXfer
                         }
                         catch (Exception exception)
                         {
-                            Console.Error.WriteLine("FileXfer relay: " + exception.Message);
+                            Diagnostics.Failure("http.loopback", "", exception);
                         }
                     });
                 }

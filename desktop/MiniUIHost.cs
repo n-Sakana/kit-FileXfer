@@ -18,8 +18,10 @@ internal static class MiniUIHost
 {
     public static int Main(string[] args)
     {
+        Diagnostics.Event("host.start", "native-linux", null);
         try { return Run(args); }
-        catch (Exception e) { Console.Error.WriteLine("FileXfer: " + e.Message); return 1; }
+        catch (Exception e) { Diagnostics.Failure("host.run", "native-linux", e); Console.Error.WriteLine("FileXfer: " + e.Message); return 1; }
+        finally { Diagnostics.Event("host.exit", "native-linux", null); }
     }
 
     private static int Run(string[] args)

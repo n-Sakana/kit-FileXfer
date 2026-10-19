@@ -19,10 +19,11 @@ namespace FileXfer
         private string _error;
 
         public readonly string Token;
+        public readonly string TransferId;
 
         public QrStream(OpticalService service, string token)
         {
-            _service = service; Token = token;
+            _service = service; Token = token; TransferId = service.DiagnosticTransfer(token);
             _worker = new Thread(Run) { IsBackground = true, Name = "FileXfer QR frames", Priority = ThreadPriority.AboveNormal };
             _worker.Start();
         }
@@ -32,6 +33,7 @@ namespace FileXfer
         /// <summary>The frame for this sequence number at scale pixels per module (rendered now when not ready yet).</summary>
         public ScaledQr Frame(uint sequence, int scale)
         {
+            var stamp = Diagnostics.Stamp();
             byte[] frame;
             lock (_gate)
             {
@@ -40,11 +42,13 @@ namespace FileXfer
                 _ready.TryGetValue(sequence, out frame);
                 Monitor.PulseAll(_gate);
             }
+            bool missed = frame == null;
             if (frame == null)
             {
                 frame = Render(sequence);
                 lock (_gate) _ready[sequence] = frame;
             }
+            Diagnostics.Sample(missed ? "send.image_cache_miss" : "send.image_request", TransferId, Diagnostics.Milliseconds(stamp), new { Sequence = sequence, Scale = scale });
             return ScaledQr.FromPacked(frame, scale);
         }
 
@@ -73,6 +77,7 @@ namespace FileXfer
                 }
                 catch (Exception error)
                 {
+                    Diagnostics.Failure("send.prefetch", TransferId, error);
                     lock (_gate) { _error = error.Message; _stopped = true; }
                     return;
                 }

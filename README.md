@@ -11,10 +11,12 @@ v0.3.0 を基にしています。ライセンスは [第三者表示](THIRD-PAR
 リポジトリ全体を配置し、`FileXfer.vbs` をダブルクリックします。
 画面は MiniUI で表示します。Windows PowerShell 5.1 が `runtime\windows-x64` の MiniUI を読み込み、
 `ui\index.html` と、その横の `ui\MiniUI.App.dll`（FileXfer の本体）を動かします。
+通常終了時は事前ビルド済みの `runtime\windows-x64\FileXfer.Launcher.dll` が本体の終了処理を呼び、診断ログの末尾を保存します。
+起動・終了時にこの接続用DLLをC#コンパイルすることはありません。
 .NET SDK、WebView2、ブラウザは不要です。
 起動ログを表示する場合は `FileXfer.cmd` を使います。
 ログは `%LOCALAPPDATA%\FileXfer\logs` に保存します。
-ダウンロードした zip から展開した場合は、MiniUI の DLL 2 つを
+ダウンロードした zip から展開した場合は、ランタイムの DLL を
 `%LOCALAPPDATA%\FileXfer\runtime` に書き写してから読み込みます。
 
 `runtime\windows-x64` と `ui\MiniUI.App.dll` は `tools\windows\build.cmd` で作ります。
@@ -53,3 +55,78 @@ Linux の起動コマンドは `./FileXfer` です。Windows と同じ `ui/` の
 スマホの PWA リモコンには、Tailscale の HTTPS 接続を利用できます。
 
 [テスト手順](tests/README.md)
+
+## 通常操作の診断ログ
+
+起動、操作、送信準備・圧縮・QR生成、表示更新、撮影・QR復号、中継、復元・検算・保存、
+中止・終了・失敗を、自動的にJSONL（1行1イベント）へ記録します。UIの追加や転送方式の変更はありません。
+
+- Windows: `%LOCALAPPDATA%\FileXfer\logs` の `trace-*.jsonl` と `launcher.jsonl` / `launcher.jsonl.previous`。
+- Linux: 通常は `~/.local/share/FileXfer/logs/trace-*.jsonl`（.NETのLocalApplicationData配下）。
+- 試験用の保存先指定: 起動前に環境変数 `FileXfer_LOG_DIR` を設定します。
+- ブラウザ／スマホPWA: **開いたURLのoriginごと、端末ごと**のIndexedDB `FileXfer-diagnostics`、
+  `events` と停止・障害前後を保護する `incidents` ストア。PCへ通信できなくても端末内の保存は続きます。
+
+PWAのログは、ページが開いて通信できる間、既存のPC接続先へ自動回収します。PCの同じログフォルダに
+`browser-trace-*.jsonl`、保護履歴を `browser-incident-*.jsonl` として保存します。
+**PC側のログフォルダをまとめてコピー**すれば回収できます。スマホへのコマンド入力は不要です。
+通信断中の履歴は接続回復後、または同じURLのページを再度開いた後に順次回収します。
+PCが書き終えた確認を受けるまで端末側の送信済み位置を進めません。確認応答の消失や複数タブでは同じ行が
+重複する場合があるため、解析時は `run` と `seq` の組でまとめてください。
+ブラウザデータを消すと端末内ログも消えます。別originの履歴を回収するにはそのURLのページを開きます。
+開発用の補助として `FileXferDiagnostics.download()` / `exportJsonl()` も残しています。
+
+各行には `schema: 1`、UTC時刻 `utc`、プロセス／ページ内の経過時間 `monoMs`、実行ID `run`、
+連番 `seq`、`route`、`event`、照合キー `correlation`、選択されたメタデータ `data` があります。
+起動行とheartbeatで端末の仮名ID、OS・ブラウザ／ランタイム、実行版を確認できます。ホストの `build` はassemblyのMVID、
+ブラウザの `build` は配信アセットの識別子です。端末の実名、カメラの実名、ファイル名・パス・内容、
+QR生データ、撮影画像、認証トークン、例外の本文や全スタックは保存しません。
+エラーは段階・型・コード・製品内の位置で記録します。C#では呼出元のファイル名／メソッド／行、取得可能なら原因の製品内1フレームも記録。
+workerではimport／WASM初期化／復号の各段階とWASM取得のHTTP状態、launcherでは依存確認／ロード／起動などを区別します。
+
+送受信を照合するキーは既存QRヘッダーの `session:blocks:blockLength:totalLength`。
+`send.ready` と `receive.session`、PWAの `relay.accepted` などで一致します。QRの形式は変えていません。
+セッション番号は既存の16 bitなので、世界全体で一意なIDではありません。UTC・実行ID・条件も合わせて照合します。
+`receive.session.data.receiver` とPWAの受信イベントの `correlation` も照合できます。
+PCの `http.*.data.last.client` はPWAの `page.start.correlation` に対応します。
+
+停止・遅さを見るときは、次の段階を分けて確認してください。
+
+| 記録 | 意味 |
+| --- | --- |
+| `send.prepare/bundle/compress/hash.*`, `send.qr` | 読出し・梱包・圧縮・QR生成。表示成功とは別 |
+| `send.ui_tick`, `send.image_request`, `send.image_cache_miss` | MiniUIの表示要求と画像取得。画面の物理的な発光を測った値ではない |
+| `send.draw`, `send.queue_empty`, `send.status` | ブラウザの描画、先読み不足、待機数 |
+| `camera.capture`, `camera.video_callback`, `camera.no_worker` | 画像到着／切出しとworkerの空き。`camera.status` に最終到着・読取りからの時間 |
+| `camera.qr_read` / `decode.read` | QRの復号成功。採用・復元進行とは別 |
+| `decode.foreign`, `decode.non_transfer` | 別セッションや転送用でないQRをworkerが観測。複数探索の観測数であり、固有QR数ではない |
+| `relay.accepted/duplicate/full/retry`, `http.*` | PWAキューへの採用・重複・満杯・既存再試行・通信時間。PCでの採用とは別 |
+| `receive.accepted/duplicate/reject.*` | PCでの新規フレーム採用・重複・形式／セッション／停止後の拒否 |
+| `receive.*.data.last.solved/blocks/progressAgeMs` | Fountainで解けたブロック数と、その数が最後に増えてからの時間。読取り回数とは別 |
+| `receive.assemble/verify/decompress/save.*`, `receive.complete` | 復元・整合性確認・保存と完了。`*.start`の後に`*.ok`がなければその段階を確認 |
+| `*.failed`, `*.stop`, `*.stopped`, `*.expired`, `process.exit`, `page.pagehide` | 失敗・明示的停止・期限切れ・終了 |
+
+頻繁な処理は5秒ごとに `count`、`totalMs`、`maxMs` と最後の状態 `last` を出力します。
+平均処理時間は `totalMs/count`。`last` は区間最後の値で、積算値ではありません。
+ページのheartbeatには通信待ちの段階・経過時間、可視性、online状態、タイマーの実間隔を残します。
+ホストのheartbeatが続いて撮影集計が増えない場合と、読取りは増えるが `solved` が増えない場合を区別できます。
+Windows通常終了は `native.shutdown.start` → `app.stop` → `native.shutdown.end` と、launcher側の
+`launcher.native_shutdown` を確認してください。Native AOT DLLの終了はホストの `ProcessExit` に頼らず明示的に処理します。
+`launcher.native_shutdown.data.code` は0=後始末とflush完了、1=2秒上限、2=後始末例外、3=保存失敗、
+-1=本体未ロード、-2=終了関数なし、-3=接続用DLLなし。上限や失敗時でもウィンドウの終了を妨げません。
+時刻は端末時計に依存するため、端末間のミリ秒単位の比較には時計のずれも考慮してください。
+
+ホストはバックグラウンド書込み、待ち行列256件・集計キー256個まで、約2 MiB×8ファイルで古いログを回転します。
+PowerShell起動ログは約2 MiB×2ファイル。旧版の `FileXfer_*.log` は自動削除しません。
+PWAは非同期IndexedDB書込みで最新16,384件（origin全体）を保持します。
+停止・失敗・offline時には直前最大512件を別枠へコピーし、その別枠は合計4,096件まで保持します。
+待機中のheartbeatで保護履歴は押し出されません。後続の停止・障害が増えると古い保護履歴から回転します。
+既存の実HTTP＋合成カメラ試験ログは142件／22.375秒で、同じ頻度なら旧512件は約1.34分、16,384件は約43分です。
+実スマホでの保持時間を保証する値ではありません。メモリ待ち行列128件・集計128キー・通信待ち32件までです。
+自動回収は10秒ごとに最大4バッチ、各48件／約48 KB、同時通信1本・4秒上限。転送本体の再試行条件は変えません。
+PCは既存のloopback／Tailscale接続・認証境界を使用し、同origin・専用ヘッダー・JSON・64 KiB上限・深さ／項目検査を行います。
+回収の書込みは同時1本・全体120バッチ／分まで。通常回収は2 MiB×8ファイル、保護履歴は2 MiB×4ファイルで別々に回転します。
+過負荷による破棄や保存失敗は `logging.loss` に記録します（保存先が復旧するまでファイルには出せません）。
+ストレージ拒否時のPWAは最新128件をメモリだけに保持し、開いている間は自動回収とexportができます。
+強制終了、停電、ブラウザの凍結・終了では直近約5秒や終了行が残らない場合があります。
+終了行がないことだけで、転送失敗や特定の停止原因を断定しないでください。

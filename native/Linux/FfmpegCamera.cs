@@ -53,7 +53,7 @@ namespace FileXfer
                 "-video_size", size, "-i", _device, "-an", "-vf", fit, "-pix_fmt", "bgra", "-f", "rawvideo", "pipe:1" })
                 info.ArgumentList.Add(arg);
             try { _process = Process.Start(info); }
-            catch (Exception) { throw new InvalidOperationException("ffmpeg を起動できません。ffmpeg が入っているか確かめてください。"); }
+            catch (Exception error) { Diagnostics.Failure("camera.ffmpeg.start", "native", error); throw new InvalidOperationException("ffmpeg を起動できません。ffmpeg が入っているか確かめてください。"); }
             _clock.Start();
             _errors = new Thread(ReadErrors) { IsBackground = true, Name = "FileXfer camera errors" };
             _errors.Start();
@@ -80,9 +80,10 @@ namespace FileXfer
                     deliver(bgra, Width, Height);
                 }
             }
-            catch (Exception)
+            catch (Exception error)
             {
                 if (_stopped) return;
+                Diagnostics.Failure("camera.ffmpeg.read", "native", error);
                 try { _process.WaitForExit(1000); } catch (Exception) { }
                 string tail;
                 lock (_gate) tail = _errorTail.Trim();
@@ -96,7 +97,16 @@ namespace FileXfer
             {
                 string line;
                 while ((line = _process.StandardError.ReadLine()) != null)
+                {
+                    // Keep device paths and driver-provided text out of persistent diagnostics.
+                    string reason = line.IndexOf("Permission denied", StringComparison.OrdinalIgnoreCase) >= 0 ? "permission"
+                        : line.IndexOf("busy", StringComparison.OrdinalIgnoreCase) >= 0 ? "busy"
+                        : line.IndexOf("No such file", StringComparison.OrdinalIgnoreCase) >= 0 ? "missing_device"
+                        : line.IndexOf("Invalid argument", StringComparison.OrdinalIgnoreCase) >= 0 ? "configuration"
+                        : "driver_error";
+                    Diagnostics.Sample("camera.ffmpeg.stderr", reason, 0, null);
                     lock (_gate) { _errorTail = (_errorTail + " " + line).Trim(); if (_errorTail.Length > 400) _errorTail = _errorTail.Substring(_errorTail.Length - 400); }
+                }
             }
             catch (Exception) { }
         }

@@ -7,29 +7,38 @@ param(
 Set-StrictMode -Version 2
 $ErrorActionPreference = 'Stop'
 $startupFailureExitCode = 3
+$script:launcherRun = [Guid]::NewGuid().ToString('N')
+$script:launcherClock = [Diagnostics.Stopwatch]::StartNew()
+$script:launcherSequence = 0
+$script:launcherStage = 'launcher.arguments'
 
 function Write-FileXferLauncherLog {
     param(
-        [string]$Level,
-        [string]$Message
+        [string]$Event,
+        [hashtable]$Data = @{}
     )
 
     try {
         $localData = [Environment]::GetFolderPath(
-            [Environment+SpecialFolder]::LocalApplicationData)
-        if ([string]::IsNullOrWhiteSpace($localData)) {
+            [Environment+SpecialFolder]::LocalApplicationData,
+            [Environment+SpecialFolderOption]::DoNotVerify)
+        if (-not $env:FileXfer_LOG_DIR -and [string]::IsNullOrWhiteSpace($localData)) {
             return
         }
 
-        $logDirectory = Join-Path $localData 'FileXfer\logs'
+        $logDirectory = if ($env:FileXfer_LOG_DIR) { $env:FileXfer_LOG_DIR } else { Join-Path $localData 'FileXfer\logs' }
         if (-not (Test-Path -LiteralPath $logDirectory -PathType Container)) {
             New-Item -ItemType Directory -Path $logDirectory -Force | Out-Null
         }
 
-        $logPath = Join-Path $logDirectory (
-            'FileXfer_' + (Get-Date -Format 'yyyyMMdd') + '.log')
-        $line = '[' + (Get-Date -Format 'HH:mm:ss') + '] ' +
-            '[' + $Level + '] ' + $Message
+        $logPath = Join-Path $logDirectory 'launcher.jsonl'
+        if ((Test-Path -LiteralPath $logPath) -and (Get-Item -LiteralPath $logPath).Length -ge 2MB) {
+            Move-Item -LiteralPath $logPath -Destination ($logPath + '.previous') -Force
+        }
+        $script:launcherSequence++
+        $line = @{ schema = 1; utc = [DateTime]::UtcNow.ToString('O'); monoMs = $script:launcherClock.ElapsedMilliseconds
+            run = $script:launcherRun; seq = $script:launcherSequence; route = 'launcher'; event = $Event
+            correlation = [string]$PID; data = $Data } | ConvertTo-Json -Compress -Depth 4
         [IO.File]::AppendAllText(
             $logPath,
             $line + [Environment]::NewLine,
@@ -118,6 +127,7 @@ function Get-FileXferCombinedSource {
 function Invoke-FileXferWindow {
     param([string[]]$Arguments)
 
+    $script:launcherStage = 'native.check_runtime'
     $runtime = Join-Path $PSScriptRoot 'runtime\windows-x64'
     $ui = Join-Path $PSScriptRoot 'ui'
     foreach ($file in @('runtime\windows-x64\MiniUI.Bridge.dll', 'runtime\windows-x64\MiniUI.Engine.dll', 'ui\MiniUI.App.dll')) {
@@ -133,29 +143,54 @@ function Invoke-FileXferWindow {
     $zone = 0
     try { $zone = [int][Security.Policy.Zone]::CreateFromUrl('file://' + $bridge).SecurityZone } catch { }
     if ($zone -ge 3) {
+        $script:launcherStage = 'native.unmarked_runtime'
         $runtime = Get-FileXferUnmarkedRuntime -Runtime $runtime
         $bridge = Join-Path $runtime 'MiniUI.Bridge.dll'
     }
 
+    $script:launcherStage = 'native.state_directory'
     $stateDirectory = Join-Path ([Environment]::GetFolderPath(
         [Environment+SpecialFolder]::LocalApplicationData)) 'FileXfer\miniui'
     [void](New-Item -ItemType Directory -Path $stateDirectory -Force)
 
+    $script:launcherStage = 'native.load_bridge'
     [void][Reflection.Assembly]::LoadFrom($bridge)
     $appArguments = @('--home', $PSScriptRoot) + @($Arguments)
     $json = '{"root":' + (ConvertTo-Json -InputObject ([string]$ui) -Compress) +
         ',"stateDir":' + (ConvertTo-Json -InputObject ([string]$stateDirectory) -Compress) +
         ',"title":"FileXfer","width":1180,"height":800,"arguments":[' +
         ((@($appArguments) | ForEach-Object { ConvertTo-Json -InputObject ([string]$_) -Compress }) -join ',') + ']}'
-    return [MiniUI.Bridge]::Run((Join-Path $ui 'index.html'), $json)
+    $script:launcherStage = 'native.run_bridge'
+    try {
+        return [MiniUI.Bridge]::Run((Join-Path $ui 'index.html'), $json)
+    }
+    finally {
+        # Precompiled with the distribution. Do not add compilation to ordinary startup or exit.
+        try {
+            $shutdownBridge = Join-Path $runtime 'FileXfer.Launcher.dll'
+            if (Test-Path -LiteralPath $shutdownBridge -PathType Leaf) {
+                [void][Reflection.Assembly]::LoadFrom($shutdownBridge)
+                $shutdownCode = [FileXfer.Launcher.NativeShutdown]::Finish((Join-Path $ui 'MiniUI.App.dll'), 2000)
+                Write-FileXferLauncherLog 'launcher.native_shutdown' @{ code = $shutdownCode; site = 'Invoke-FileXferWindow.finally' }
+            }
+            else {
+                Write-FileXferLauncherLog 'launcher.native_shutdown' @{ code = -3; site = 'Invoke-FileXferWindow.finally' }
+            }
+        }
+        catch {
+            Write-FileXferLauncherLog 'launcher.native_shutdown.failed' @{ type = $_.Exception.GetType().Name; code = $_.Exception.HResult
+                site = 'Invoke-FileXferWindow.finally'; line = $_.InvocationInfo.ScriptLineNumber }
+        }
+    }
 }
 
-# MiniUI.Bridge.dll and MiniUI.Engine.dll rewritten under %LOCALAPPDATA%\FileXfer\runtime: a file written from
-# bytes has no zone mark (Copy-Item would copy the mark). One folder per pair of files.
+# Runtime DLLs rewritten under %LOCALAPPDATA%\FileXfer\runtime: a file written from
+# bytes has no zone mark (Copy-Item would copy the mark). One folder per set of files.
 function Get-FileXferUnmarkedRuntime {
     param([string]$Runtime)
 
     $names = @('MiniUI.Bridge.dll', 'MiniUI.Engine.dll')
+    if (Test-Path -LiteralPath (Join-Path $Runtime 'FileXfer.Launcher.dll') -PathType Leaf) { $names += 'FileXfer.Launcher.dll' }
     $key = ($names | ForEach-Object {
         $item = Get-Item -LiteralPath (Join-Path $Runtime $_)
         '{0}:{1}:{2}' -f $_, $item.Length, $item.LastWriteTimeUtc.Ticks
@@ -195,6 +230,7 @@ function Get-FileXferUnmarkedRuntime {
 function Invoke-FileXferServer {
     param([string[]]$Arguments)
 
+    $script:launcherStage = 'server.sources'
     $isWindowsPowerShell = $PSVersionTable.PSEdition -eq 'Desktop'
     $sourceDirectory = Join-Path $PSScriptRoot 'src'
     $sourceFiles = if (Test-Path -LiteralPath $sourceDirectory -PathType Container) {
@@ -220,6 +256,7 @@ function Invoke-FileXferServer {
         throw "FileXfer could not find lib\zxing.dll."
     }
 
+    $script:launcherStage = 'server.cache'
     $buildFiles = @($sourceFiles) + @($webFiles) + @(Get-Item -LiteralPath $zxingPath)
     $runtimeKey = Get-FileXferRuntimeKey
     $sourceHash = Get-FileXferSourceHash -SourceFiles $buildFiles -RuntimeKey $runtimeKey
@@ -234,6 +271,7 @@ function Invoke-FileXferServer {
         $temporaryAssembly = Join-Path $cacheDirectory ("FileXfer.Host.{0}.tmp.dll" -f $PID)
 
         try {
+            $script:launcherStage = 'server.compile'
             Write-Host ("Compiling FileXfer C# for {0}..." -f $runtimeKey)
             $source = Get-FileXferCombinedSource -SourceFiles $sourceFiles
             if ($isWindowsPowerShell) {
@@ -266,6 +304,7 @@ function Invoke-FileXferServer {
                     -ReferencedAssemblies @($frameworkAssemblies + $zxingPath)
             }
 
+            $script:launcherStage = 'server.save_assembly'
             if (Test-Path -LiteralPath $assemblyPath -PathType Leaf) {
                 Remove-Item -LiteralPath $assemblyPath -Force
             }
@@ -282,24 +321,31 @@ function Invoke-FileXferServer {
         Write-Host ("Using cached FileXfer C# for {0}." -f $runtimeKey)
     }
 
+    $script:launcherStage = 'server.load_dependency'
     [void][Reflection.Assembly]::Load([IO.File]::ReadAllBytes($zxingPath))
+    $script:launcherStage = 'server.load_assembly'
     [void][Reflection.Assembly]::LoadFrom($assemblyPath)
     $env:FileXfer_BUILD_ID = $sourceHash
+    $script:launcherStage = 'server.run'
     return [FileXfer.Program]::Run($PSScriptRoot, [string[]]$Arguments)
 }
 
+Write-FileXferLauncherLog 'launcher.start' @{ psVersion = $PSVersionTable.PSVersion.ToString(); pid = $PID }
 try {
     $arguments = @($FileXferArguments | Where-Object { $null -ne $_ })
     $onWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
     if (-not $onWindows -or $arguments -contains '--no-browser' -or $arguments -contains '--help' -or $arguments -contains '-h') {
-        exit (Invoke-FileXferServer -Arguments $arguments)
+        $serverExit = Invoke-FileXferServer -Arguments $arguments
+        Write-FileXferLauncherLog 'launcher.exit' @{ code = $serverExit }
+        exit $serverExit
     }
 
     $exitCode = Invoke-FileXferWindow -Arguments $arguments
     if ($exitCode -ne 0) {
-        Write-FileXferLauncherLog 'ERROR' ("MiniUI ended with exit code {0}" -f $exitCode)
+        Write-FileXferLauncherLog 'launcher.failed' @{ code = $exitCode; stage = $script:launcherStage; site = 'Invoke-FileXferWindow' }
         exit $startupFailureExitCode
     }
+    Write-FileXferLauncherLog 'launcher.exit' @{ code = 0 }
     exit 0
 }
 catch {
@@ -309,7 +355,9 @@ catch {
             $_.InvocationInfo.ScriptLineNumber + ')'
     }
     $detail = 'launcher failed' + $location + ' ' + $_.Exception.ToString()
-    Write-FileXferLauncherLog 'ERROR' $detail
+    Write-FileXferLauncherLog 'launcher.failed' @{ type = $_.Exception.GetType().Name; code = $_.Exception.HResult; stage = $script:launcherStage
+        site = [IO.Path]::GetFileName($_.InvocationInfo.ScriptName); line = $_.InvocationInfo.ScriptLineNumber
+        causeType = $_.Exception.GetBaseException().GetType().Name; causeCode = $_.Exception.GetBaseException().HResult }
     [Console]::Error.WriteLine('FileXfer: ' + $detail)
     exit $startupFailureExitCode
 }

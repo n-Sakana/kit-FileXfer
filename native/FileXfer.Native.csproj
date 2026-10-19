@@ -18,6 +18,9 @@
     <UseSystemResourceKeys>false</UseSystemResourceKeys>
     <OptimizationPreference>Size</OptimizationPreference>
     <StripSymbols>true</StripSymbols>
+    <DebugType>none</DebugType>
+    <!-- Keep compiler-generated source locations independent of the build machine. -->
+    <PathMap>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..'))=/_/FileXfer</PathMap>
     <NoWarn>$(NoWarn);CA1416</NoWarn>
   </PropertyGroup>
   <ItemGroup>

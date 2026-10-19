@@ -237,6 +237,7 @@ def memory_ui(page, api):
     # DOM replacement retains the in-memory test shims; no resource URLs are loaded.
     page.evaluate('(html)=>{document.open();document.write(html);document.close();}',html)
     page.add_style_tag(content=(ROOT/'web/app.css').read_text())
+    page.add_script_tag(content=(ROOT/'web/diagnostics.js').read_text())
     page.add_script_tag(content=(ROOT/'web/app.js').read_text())
 
 

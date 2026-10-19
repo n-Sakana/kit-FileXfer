@@ -48,6 +48,7 @@ namespace FileXfer
         private bool _stopped, _complete;
         private long _captured, _decoded, _recognized;
         private double _lastRecognizedMs = -1, _startedMs;
+        private double _lastCaptureMs = -1, _lastDecodeMs = -1;
         private Tracking _tracking;
 
         public CameraReceiver(ICameraSource camera, OpticalReceiveService receiver, int workers, bool openWhenDone)
@@ -57,6 +58,7 @@ namespace FileXfer
 
         public void Start()
         {
+            Diagnostics.Event("camera.start", "native", new { Workers = _workers, Camera = Diagnostics.Id(_camera.Name) });
             _receiver.Reset(ReceiverId);
             _startedMs = _clock.Elapsed.TotalMilliseconds;
             for (int i = 0; i < _workers; i++)
@@ -64,16 +66,20 @@ namespace FileXfer
                 var thread = new Thread(Decode) { IsBackground = true, Name = "FileXfer QR decoder " + (i + 1) };
                 _threads.Add(thread); thread.Start();
             }
-            _camera.Start(OnFrame);
+            try { _camera.Start(OnFrame); }
+            catch (Exception error) { Diagnostics.Failure("camera.start", "native", error); throw; }
         }
 
         private void OnFrame(byte[] bgra, int width, int height)
         {
+            var stamp = Diagnostics.Stamp();
             var preview = NativeBitmap.Downscale(bgra, width, height, PreviewWidth);
             lock (_gate)
             {
                 if (_stopped) return;
+                Diagnostics.Sample("camera.capture", "native", Diagnostics.Milliseconds(stamp), new { Width = width, Height = height, Replaced = _frameNumber != _takenNumber });
                 _captured++;
+                _lastCaptureMs = _clock.Elapsed.TotalMilliseconds;
                 _frame = bgra; _frameWidth = width; _frameHeight = height; _frameNumber++;
                 _preview = preview; _previewSequence++;
                 Monitor.Pulse(_gate);
@@ -111,20 +117,26 @@ namespace FileXfer
                     int src = ((region.Y + y) * width + region.X) * 4, dst = y * region.Width;
                     for (int x = 0; x < region.Width; x++, src += 4) gray[dst + x] = (byte)((frame[src] * 29 + frame[src + 1] * 150 + frame[src + 2] * 77) >> 8);
                 }
+                var stamp = Diagnostics.Stamp();
                 Result result = null;
                 try { result = reader.Decode(new RGBLuminanceSource(gray, region.Width, region.Height, RGBLuminanceSource.BitmapFormat.Gray8)); }
-                catch (Exception) { result = null; }
+                catch (Exception error) { Diagnostics.Sample("camera.decode_exception", "native", 0,
+                    new { Type = error.GetType().Name, Code = error.HResult, Site = "CameraReceiver.Decode:ZXing.Decode" }); result = null; }
                 byte[] bytes = Bytes(result);
+                Diagnostics.Sample(result == null ? "camera.decode_miss" : "camera.qr_read", "native",
+                    Diagnostics.Milliseconds(stamp), new { CropWidth = region.Width, CropHeight = region.Height });
+                if (result != null && bytes == null) Diagnostics.Sample("camera.non_binary_qr", "native", 0, null);
                 OpticalReceiveResult progress = null;
                 string failure = null;
                 if (bytes != null)
                 {
                     try { progress = _receiver.AddFrame(ReceiverId, bytes, _openWhenDone); }
-                    catch (Exception error) { failure = error.Message; }
+                    catch (Exception error) { Diagnostics.Failure("camera.receive", "native", error); failure = error.Message; }
                 }
                 lock (_gate)
                 {
                     _decoded++;
+                    _lastDecodeMs = _clock.Elapsed.TotalMilliseconds;
                     if (failure != null) { _error = failure; Monitor.PulseAll(_gate); return; }
                     if (progress != null && progress.Recognized)
                     {
@@ -174,6 +186,12 @@ namespace FileXfer
             lock (_gate)
             {
                 double now = _clock.Elapsed.TotalMilliseconds;
+                Diagnostics.Sample("camera.status", "native", 0, new { Captured = _captured, Decoded = _decoded,
+                    Recognized = _recognized, Running = _camera.Running, Failed = _error != null || _camera.Error != null,
+                    Width = _camera.Width, Height = _camera.Height, Fps = _camera.FramesPerSecond,
+                    CaptureAgeMs = now - (_lastCaptureMs >= 0 ? _lastCaptureMs : _startedMs),
+                    DecodeAgeMs = now - (_lastDecodeMs >= 0 ? _lastDecodeMs : _startedMs),
+                    ReadAgeMs = now - (_lastRecognizedMs >= 0 ? _lastRecognizedMs : _startedMs) });
                 return new
                 {
                     Running = !_stopped && !_complete && _error == null && _camera.Running,
@@ -197,6 +215,7 @@ namespace FileXfer
         public void Dispose()
         {
             lock (_gate) { if (_stopped) return; _stopped = true; Monitor.PulseAll(_gate); }
+            Diagnostics.Event("camera.stop", "native", new { Complete = _complete, Failed = _error != null || _camera.Error != null, Captured = _captured, Decoded = _decoded, Recognized = _recognized });
             try { _camera.Dispose(); } catch (Exception) { }
             foreach (var thread in _threads) thread.Join(2000);
             if (!_complete) _receiver.Stop(ReceiverId);

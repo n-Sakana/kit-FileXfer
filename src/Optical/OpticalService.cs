@@ -34,6 +34,18 @@ namespace FileXfer
             int framesPerSecond,
             string errorCorrection)
         {
+            var stamp = Diagnostics.Stamp();
+            var preparation = Guid.NewGuid().ToString("N");
+            Diagnostics.Event("send.prepare.start", preparation, new { FrameBytes = frameBytes, Fps = framesPerSecond,
+                Files = selectedNames == null ? 0 : selectedNames.Count });
+            try { return StartCore(source, selectedNames, frameBytes, framesPerSecond, errorCorrection, preparation); }
+            catch (Exception error) { Diagnostics.Failure("send.prepare", preparation, error); throw; }
+            finally { Diagnostics.Event("send.prepare.end", preparation, new { Ms = Diagnostics.Milliseconds(stamp) }); }
+        }
+
+        private OpticalStartResult StartCore(FolderSnapshot source, IList<string> selectedNames,
+            int frameBytes, int framesPerSecond, string errorCorrection, string preparation)
+        {
             if (frameBytes < MinimumFrameBytes || frameBytes > MaximumFrameBytes)
             {
                 throw new ArgumentException("1 枚に載せる量が正しくありません。", "frameBytes");
@@ -59,7 +71,8 @@ namespace FileXfer
                 source,
                 selectedNames,
                 MaximumFiles,
-                MaximumBundleBytes);
+                MaximumBundleBytes,
+                preparation);
             frameBytes = Math.Min(frameBytes, MaximumBytesForCorrection(errorCorrection));
             // Tiny transfers need not be padded into a version-40 QR.
             frameBytes = Math.Max(MinimumFrameBytes,
@@ -83,6 +96,9 @@ namespace FileXfer
                 _sessions.Add(session.Describe().Token, session);
             }
 
+            Diagnostics.Event("send.ready", session.TransferId, new { Preparation = preparation, Files = payload.FileCount,
+                OriginalBytes = payload.OriginalBytes, TransmittedBytes = payload.Bytes.Length,
+                FrameBytes = frameBytes, Fps = framesPerSecond, Ec = errorCorrection, QrVersion = session.Describe().QrVersion });
             return session.Describe();
         }
 
@@ -180,8 +196,18 @@ namespace FileXfer
             {
                 if (!string.IsNullOrEmpty(token))
                 {
+                    OpticalSession ended;
+                    if (_sessions.TryGetValue(token, out ended)) Diagnostics.Event("send.stopped", ended.TransferId, null);
                     _sessions.Remove(token);
                 }
+            }
+        }
+
+        public string DiagnosticTransfer(string token)
+        {
+            lock (_gate) {
+                OpticalSession session;
+                return token != null && _sessions.TryGetValue(token, out session) ? session.TransferId : "";
             }
         }
 
@@ -217,7 +243,10 @@ namespace FileXfer
                 if (DateTime.UtcNow - entry.Value.LastUsedUtc > TimeSpan.FromMinutes(10))
                     expired.Add(entry.Key);
             }
-            foreach (var token in expired) _sessions.Remove(token);
+            foreach (var token in expired) {
+                Diagnostics.Event("send.expired", _sessions[token].TransferId, null);
+                _sessions.Remove(token);
+            }
         }
 
         internal static uint FountainSweepDigest()
@@ -279,6 +308,7 @@ namespace FileXfer
                 _payload,
                 frameBytes - FrameHeaderLength,
                 _sessionId);
+            TransferId = Diagnostics.Transfer(_sessionId, _encoder.BlockCount, _encoder.BlockLength, _payload.Length);
             if (_encoder.BlockCount > ushort.MaxValue)
             {
                 throw new ArgumentException(
@@ -290,6 +320,7 @@ namespace FileXfer
             OriginalBytes = payload.OriginalBytes;
         }
 
+        public string TransferId { get; private set; }
         public DateTime LastUsedUtc { get; set; }
         public string Label { get; private set; }
         public int FileCount { get; private set; }
@@ -312,7 +343,7 @@ namespace FileXfer
 
         public OpticalStartResult Describe()
         {
-            return new OpticalStartResult(
+            var result = new OpticalStartResult(
                 _token,
                 Label,
                 FileCount,
@@ -324,6 +355,8 @@ namespace FileXfer
                 _encoder.BlockCount,
                 _qrVersion,
                 (double)_encoder.BlockCount / _framesPerSecond);
+            result.TransferId = TransferId;
+            return result;
         }
 
         public byte[] RenderFrame(uint sequence)
@@ -387,6 +420,14 @@ namespace FileXfer
         }
 
         private void Encode(uint sequence, out byte[] frame, out QRCode qr)
+        {
+            var stamp = Diagnostics.Stamp();
+            try { EncodeCore(sequence, out frame, out qr); }
+            catch (Exception error) { Diagnostics.Failure("send.qr", TransferId, error); throw; }
+            finally { Diagnostics.Sample("send.qr", TransferId, Diagnostics.Milliseconds(stamp), new { Sequence = sequence }); }
+        }
+
+        private void EncodeCore(uint sequence, out byte[] frame, out QRCode qr)
         {
             var block = _encoder.Encode(sequence);
             frame = new byte[FrameHeaderLength + block.Length];
@@ -867,8 +908,11 @@ namespace FileXfer
             FolderSnapshot source,
             IList<string> selectedNames,
             int maximumFiles,
-            int maximumBytes)
+            int maximumBytes,
+            string preparation = "")
         {
+            var stamp = Diagnostics.Stamp();
+            Diagnostics.Event("send.bundle.start", preparation, null);
             if (source == null)
             {
                 throw new ArgumentNullException("source");
@@ -891,7 +935,9 @@ namespace FileXfer
             var contents = new List<byte[]>();
             foreach (var file in selected)
             {
+                var readStamp = Diagnostics.Stamp();
                 var bytes = File.ReadAllBytes(file.FullPath);
+                Diagnostics.Sample("send.read_file", preparation, Diagnostics.Milliseconds(readStamp), new { Bytes = bytes.Length });
                 total = checked(total + bytes.LongLength);
                 if (total > maximumBytes)
                 {
@@ -939,7 +985,8 @@ namespace FileXfer
                 offset += bytes.Length;
             }
 
-            var fileContainer = PackFile(label + ".dcb1", BundleMediaType, bundle);
+            Diagnostics.Event("send.bundle.ok", preparation, new { Ms = Diagnostics.Milliseconds(stamp), Bytes = bundle.Length, Files = selected.Count });
+            var fileContainer = PackFile(label + ".dcb1", BundleMediaType, bundle, preparation);
             return new OpticalPayload(label, selected.Count, total, fileContainer);
         }
 
@@ -971,10 +1018,13 @@ namespace FileXfer
             return result;
         }
 
-        private static byte[] PackFile(string name, string mediaType, byte[] bytes)
+        private static byte[] PackFile(string name, string mediaType, byte[] bytes, string preparation)
         {
+            var stamp = Diagnostics.Stamp();
+            Diagnostics.Event("send.compress.start", preparation, new { Bytes = bytes.Length });
             var transmitted = CompressIfUseful(bytes);
             var compressed = !object.ReferenceEquals(transmitted, bytes);
+            Diagnostics.Event("send.compress.ok", preparation, new { Compressed = compressed, Bytes = transmitted.Length, Ms = Diagnostics.Milliseconds(stamp) });
             var nameBytes = Encoding.UTF8.GetBytes(name);
             var typeBytes = Encoding.UTF8.GetBytes(mediaType);
             var result = new byte[checked(
@@ -985,7 +1035,9 @@ namespace FileXfer
             WriteUInt16(result, 7, checked((ushort)typeBytes.Length));
             WriteUInt32(result, 9, checked((uint)bytes.Length));
             WriteUInt32(result, 13, checked((uint)transmitted.Length));
+            Diagnostics.Event("send.hash.start", preparation, null);
             var digest = Sha256(bytes);
+            Diagnostics.Event("send.hash.ok", preparation, null);
             Buffer.BlockCopy(digest, 0, result, 17, digest.Length);
             Buffer.BlockCopy(nameBytes, 0, result, FileHeaderLength, nameBytes.Length);
             Buffer.BlockCopy(
@@ -1219,6 +1271,7 @@ namespace FileXfer
             MinimumSeconds = minimumSeconds;
         }
 
+        public string TransferId { get; set; }
         public string Token { get; private set; }
         public string Label { get; private set; }
         public int FileCount { get; private set; }

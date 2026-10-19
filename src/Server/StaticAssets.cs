@@ -50,6 +50,7 @@ namespace FileXfer
             return File.Exists(Path.Combine(webDirectory, "index.html"))
                 && File.Exists(Path.Combine(webDirectory, "app.css"))
                 && File.Exists(Path.Combine(webDirectory, "app.js"))
+                && File.Exists(Path.Combine(webDirectory, "diagnostics.js"))
                 && File.Exists(Path.Combine(webDirectory, "optical-core.js"))
                 && File.Exists(Path.Combine(webDirectory, "zxing-reader.js"))
                 && File.Exists(Path.Combine(webDirectory, "qr-worker.js"))
@@ -130,6 +131,7 @@ namespace FileXfer
                 { "/app.css", LoadFile(webDirectory, "app.css", "text/css; charset=utf-8", true) },
                 { "/optical-core.js", LoadFile(webDirectory, "optical-core.js", "text/javascript; charset=utf-8", true) },
                 { "/zxing-reader.js", LoadFile(webDirectory, "zxing-reader.js", "text/javascript; charset=utf-8", true) },
+                { "/diagnostics.js", LoadFile(webDirectory, "diagnostics.js", "text/javascript; charset=utf-8", true) },
                 { "/app.js", LoadFile(webDirectory, "app.js", "text/javascript; charset=utf-8", true) },
                 { "/qr-worker.js", LoadFile(webDirectory, "qr-worker.js", "text/javascript; charset=utf-8", true) },
                 { "/zxing_reader-EOacYbLr.wasm", LoadFile(webDirectory, "zxing_reader-EOacYbLr.wasm", "application/wasm", true) },
@@ -190,6 +192,7 @@ namespace FileXfer
                 { "/app.css", LoadResource("FileXfer.Web.app.css", "text/css; charset=utf-8", true) },
                 { "/optical-core.js", LoadResource("FileXfer.Web.optical-core.js", "text/javascript; charset=utf-8", true) },
                 { "/zxing-reader.js", LoadResource("FileXfer.Web.zxing-reader.js", "text/javascript; charset=utf-8", true) },
+                { "/diagnostics.js", LoadResource("FileXfer.Web.diagnostics.js", "text/javascript; charset=utf-8", true) },
                 { "/app.js", LoadResource("FileXfer.Web.app.js", "text/javascript; charset=utf-8", true) },
                 { "/qr-worker.js", LoadResource("FileXfer.Web.qr-worker.js", "text/javascript; charset=utf-8", true) },
                 { "/zxing_reader-EOacYbLr.wasm", LoadResource("FileXfer.Web.zxing_reader-EOacYbLr.wasm", "application/wasm", true) },

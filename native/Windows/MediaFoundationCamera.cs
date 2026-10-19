@@ -77,6 +77,7 @@ namespace FileXfer
                     _name = ReadString(devices[pick], ref MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME);
                     Guid iid = IID_IMFMediaSource;
                     int hr = ((delegate* unmanaged[Stdcall]<void*, Guid*, void**, int>)V(devices[pick])[33])(devices[pick], &iid, &source); // IMFActivate::ActivateObject
+                    if (hr < 0) Diagnostics.Event("camera.mf.activate.failed", "native", new { Code = hr });
                     if (hr == unchecked((int)0x80070005)) throw new CameraException("カメラを使う許可がありません。Windows の設定の「プライバシーとセキュリティ」>「カメラ」で、デスクトップ アプリにカメラの使用を許可してください。");
                     if (hr == unchecked((int)0xC00D3704) || hr == unchecked((int)0x800700AA)) throw new CameraException("カメラを開けません。ほかのアプリが使っていないか確かめてください。");
                     Check(hr, "ActivateObject");
@@ -92,6 +93,7 @@ namespace FileXfer
                 {
                     uint stream, flags; long time; void* sample = null;
                     int hr = ((delegate* unmanaged[Stdcall]<void*, uint, uint, uint*, uint*, long*, void**, int>)V(reader)[9])(reader, FIRST_VIDEO_STREAM, 0, &stream, &flags, &time, &sample); // ReadSample
+                    if (hr < 0 || (flags & 3) != 0) Diagnostics.Event("camera.mf.read.failed", "native", new { Code = hr, Flags = flags });
                     if (hr < 0) throw new CameraException(hr == unchecked((int)0xC00D3EA2) || hr == unchecked((int)0x80070491) ? "カメラが外れました。" : "カメラの映像を読めません (0x" + hr.ToString("x8") + ")。");
                     if ((flags & 0x2) != 0) throw new CameraException("カメラの映像が終わりました。"); // END OF STREAM
                     if ((flags & 0x1) != 0) throw new CameraException("カメラでエラーが起きました。");
@@ -100,8 +102,8 @@ namespace FileXfer
                     finally { Release(sample); }
                 }
             }
-            catch (CameraException error) { _error = error.Message; }
-            catch (Exception error) { _error = "カメラを使えません: " + error.Message; }
+            catch (CameraException error) { Diagnostics.Failure("camera.mf", "native", error); _error = error.Message; }
+            catch (Exception error) { Diagnostics.Failure("camera.mf", "native", error); _error = "カメラを使えません: " + error.Message; }
             finally
             {
                 _running = false;
@@ -224,7 +226,13 @@ namespace FileXfer
 
         private static void** V(void* p) { return *(void***)p; }
         private static void Release(void* p) { if (p != null) ((delegate* unmanaged[Stdcall]<void*, uint>)V(p)[2])(p); }
-        private static void Check(int hr, string what) { if (hr < 0) throw new CameraException("カメラを使えません (" + what + " 0x" + hr.ToString("x8") + ")。"); }
+        private static void Check(int hr, string what) {
+            if (hr < 0) {
+                // 'what' is a fixed API name at each call site, never driver-provided text.
+                Diagnostics.Event("camera.mf.api.failed", what, new { Code = hr });
+                throw new CameraException("カメラを使えません (" + what + " 0x" + hr.ToString("x8") + ")。");
+            }
+        }
 
         private static int EnumDevices(void*** devices, uint* count)
         {

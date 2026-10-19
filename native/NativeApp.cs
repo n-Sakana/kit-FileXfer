@@ -42,16 +42,27 @@ namespace FileXfer
 
         public string Call(string input)
         {
+            var op = "unknown";
+            var stamp = Diagnostics.Stamp();
             try
             {
                 var request = JsonCodec.ParseObject(Encoding.UTF8.GetBytes(input));
+                op = SafeOperation(Text(request, "op"));
                 return Json(Dispatch(Text(request, "op"), request));
             }
-            catch (Exception error) { return Json(new { Error = Message(error) }); }
+            catch (Exception error) { Diagnostics.Failure("native.call", op, error); return Json(new { Error = Message(error) }); }
+            finally { Diagnostics.Sample("native.call", op, Diagnostics.Milliseconds(stamp), null); }
         }
 
         private object Dispatch(string op, Dictionary<string, object> r)
         {
+            if (op != "poll" && op != "job" && op != "receive.status" && op != "diagnostics")
+                Diagnostics.Sample("native.operation", SafeOperation(op), 0, null);
+            if (op == "diagnostics") {
+                var qr = _qr;
+                Diagnostics.Sample("send.ui_tick", qr == null ? "" : qr.TransferId, 0, new { Sequence = Int(r, "sequence"), Scale = Int(r, "scale"), Frames = Int(r, "frames") });
+                return new { Ok = true };
+            }
             if (op == "init") return Init(r);
             if (!_initialized) throw new InvalidOperationException("FileXfer is not initialised.");
             switch (op)
@@ -62,19 +73,29 @@ namespace FileXfer
                 case "folder.reload": lock (_gate) LoadFolder(true); return Folder(0);
                 case "select": return Select(Text(r, "name"), Bool(r, "on"));
                 case "selectAll": return SelectAll(Bool(r, "on"));
-                case "pickFiles": return StartJob(() => Pick(false));
-                case "pickFolder": return StartJob(() => Pick(true));
-                case "send.start": return StartJob(() => StartSending(Int(r, "frameBytes"), Int(r, "fps"), Text(r, "ec")));
+                case "pickFiles": return StartJob("pickFiles", () => Pick(false));
+                case "pickFolder": return StartJob("pickFolder", () => Pick(true));
+                case "send.start": return StartJob("send.start", () => StartSending(Int(r, "frameBytes"), Int(r, "fps"), Text(r, "ec")));
                 case "send.stop": StopSending(); return new { Stopped = true };
                 case "cameras": return new { Cameras = Cameras() };
                 case "receive.start": return StartReceiving(OptionalText(r, "camera"), Int(r, "width"), Int(r, "fps"), Int(r, "workers"), Bool(r, "openWhenDone"));
                 case "receive.status": { var camera = _camera; return camera == null ? (object)new { Running = false } : camera.Status(); }
                 case "receive.stop": StopReceiving(); return new { Stopped = true };
                 case "openFolder": return new { Opened = OutputLauncher.OpenFolder(Text(r, "path")) };
-                case "remote.entry": return StartJob(RemoteEntry);
+                case "remote.entry": return StartJob("remote.entry", RemoteEntry);
                 case "remote.list": return new { Remotes = _server == null ? new List<RemoteControlInfo>() : _server.Remotes.ReadActive() };
                 case "remote.command": return RemoteCommand(Text(r, "action"), Int(r, "frameBytes", 1000), Int(r, "fps", 30), OptionalText(r, "ec") ?? "L", Int(r, "displaySize", 900));
                 default: throw new ArgumentException("Unknown request: " + op);
+            }
+        }
+
+        private static string SafeOperation(string op) {
+            switch (op) {
+                case "init": case "folder": case "folder.reload": case "select": case "selectAll":
+                case "pickFiles": case "pickFolder": case "send.start": case "send.stop": case "cameras":
+                case "receive.start": case "receive.stop": case "openFolder": case "remote.entry":
+                case "remote.list": case "remote.command": case "poll": case "job": case "receive.status": case "diagnostics": return op;
+                default: return "unknown";
             }
         }
 
@@ -85,6 +106,7 @@ namespace FileXfer
             lock (_gate)
             {
                 if (_initialized) return Describe();
+                Diagnostics.Event("app.start", "native", null);
                 var args = new List<string>();
                 object raw;
                 if (r.TryGetValue("args", out raw) && raw is List<object>) foreach (var item in (List<object>)raw) if (item is string) args.Add((string)item);
@@ -102,7 +124,7 @@ namespace FileXfer
                 _receiver = new OpticalReceiveService(_output);
                 string pathError = null;
                 try { _state = new AppState(options.InitialPath); }
-                catch (Exception error) { pathError = Message(error); _state = new AppState(null); }
+                catch (Exception error) { Diagnostics.Failure("app.path", "native", error); pathError = Message(error); _state = new AppState(null); }
                 DesktopActivation.Register(mode => { Interlocked.Increment(ref _activation); lock (_gate) LoadFolder(true); });
                 StartServer();
                 LoadFolder(true);
@@ -161,7 +183,7 @@ namespace FileXfer
                 Task.Run(async delegate
                 {
                     try { await server.RunAsync(stop.Token); }
-                    catch (Exception error) { _serverError = Message(error); }
+                    catch (Exception error) { Diagnostics.Failure("server.run", "native", error); _serverError = Message(error); }
                 });
                 int port = _port;
                 // The phone opens https://<device>.<tailnet>.ts.net:10000/, which tailscale serve forwards here
@@ -171,11 +193,13 @@ namespace FileXfer
                     {
                         string url, error;
                         bool ok = TailnetDiscovery.TryConfigureServe(port, out url, out error);
+                        Diagnostics.Event("remote.serve", "native", new { Ready = ok, HasError = !string.IsNullOrEmpty(error) });
                         _tailnet = ok ? (error ?? "") : (error ?? "Tailscale を使えません。");
                     });
             }
             catch (Exception error)
             {
+                Diagnostics.Failure("server.start", "native", error);
                 _serverError = Message(error);
                 _server = null;
             }
@@ -198,13 +222,18 @@ namespace FileXfer
 
         // ---------------------------------------------------------------- jobs
 
-        private object StartJob(Func<object> work)
+        private object StartJob(string operation, Func<object> work)
         {
             lock (_gate)
             {
                 if (_jobs.Count >= 32) throw new InvalidOperationException("処理中の操作が多すぎます。");
                 int id = ++_nextJob;
-                _jobs[id] = Task.Run(work);
+                Diagnostics.Event("native.job.start", id.ToString(), new { Operation = operation });
+                _jobs[id] = Task.Run(() => {
+                    var stamp = Diagnostics.Stamp();
+                    try { var result = work(); Diagnostics.Event("native.job.ok", id.ToString(), new { Operation = operation, Ms = Diagnostics.Milliseconds(stamp) }); return result; }
+                    catch (Exception error) { Diagnostics.Failure("native.job", id.ToString(), error); throw; }
+                });
                 return new { Job = id };
             }
         }
@@ -303,16 +332,17 @@ namespace FileXfer
             if (folder)
             {
                 string path = NativePicker.PickFolderAsync(initial).GetAwaiter().GetResult();
-                if (path == null) return new { Cancelled = true };
+                if (path == null) { Diagnostics.Event("picker.cancelled", "folder", null); return new { Cancelled = true }; }
                 _state.SelectFolder("optical", path);
             }
             else
             {
                 var paths = NativePicker.PickFilesAsync(initial, "optical").GetAwaiter().GetResult();
-                if (paths == null || paths.Count == 0) return new { Cancelled = true };
+                if (paths == null || paths.Count == 0) { Diagnostics.Event("picker.cancelled", "files", null); return new { Cancelled = true }; }
                 _state.SelectFiles("optical", paths);
             }
             lock (_gate) LoadFolder(true);
+            Diagnostics.Event("picker.selected", folder ? "folder" : "files", new { Files = _folder.Files.Count });
             return new { Cancelled = false };
         }
 
@@ -328,7 +358,7 @@ namespace FileXfer
             lock (_gate) _qr = new QrStream(_optical, result.Token);
             return new
             {
-                result.Token, result.Label, result.FileCount, result.OriginalBytes, result.FrameBytes, result.FramesPerSecond,
+                result.TransferId, result.Token, result.Label, result.FileCount, result.OriginalBytes, result.FrameBytes, result.FramesPerSecond,
                 result.ErrorCorrection, result.SourceBlocks, result.QrVersion, result.MinimumSeconds,
                 Side = 17 + 4 * result.QrVersion + 8
             };
@@ -350,6 +380,7 @@ namespace FileXfer
             StopReceiving();
             if (width != 960 && width != 1280 && width != 1920) throw new ArgumentException("撮影幅が正しくありません。");
             if (fps != 30 && fps != 60) throw new ArgumentException("撮影 fps が正しくありません。");
+            Diagnostics.Event("camera.request", "native", new { Camera = Diagnostics.Id(camera), Width = width, Fps = fps, Workers = workers });
             var receiver = new CameraReceiver(OpenCamera(camera, width, fps), _receiver, workers, openWhenDone);
             lock (_gate) _camera = receiver;
             receiver.Start();
@@ -483,6 +514,7 @@ namespace FileXfer
 
         public void Dispose()
         {
+            Diagnostics.Event("app.stop", "native", null);
             StopReceiving();
             StopSending();
             if (_serverStop != null) _serverStop.Cancel();

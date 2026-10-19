@@ -404,8 +404,16 @@
     $("stopQr").focus();
   }
 
+  var diagnosticFrames = 0;
+  setInterval(function () {
+    if (!state.sending) return;
+    try { native("diagnostics", { sequence: state.sending.sequence, scale: state.sending.scale, frames: diagnosticFrames }); } catch (_) {}
+    diagnosticFrames = 0;
+  }, 5000);
+
   function showFrame() {
     var s = state.sending;
+    diagnosticFrames++;
     $("presentImage").src = "app:qr?t=" + s.session.token + "&s=" + s.sequence + "&m=" + s.scale;
   }
 

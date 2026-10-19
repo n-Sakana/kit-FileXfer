@@ -56,6 +56,7 @@ namespace FileXfer
 
         public Uri Start()
         {
+            Diagnostics.Event("server.start", "http", new { Port = _port });
             _listener.IgnoreWriteExceptions = true;
             if (PlatformInfo.IsWindows)
             {
@@ -142,7 +143,7 @@ namespace FileXfer
                     pending.Add(Task.Run(async delegate
                     {
                         try { await HandleSafelyAsync(accepted); }
-                        catch (Exception exception) { Console.Error.WriteLine(exception); }
+                        catch (Exception exception) { Diagnostics.Failure("http.transport", "", exception); }
                         finally { _requestSlots.Release(); }
                     }));
                 }
@@ -156,6 +157,7 @@ namespace FileXfer
 
         public void Dispose()
         {
+            Diagnostics.Event("server.stop", "http", null);
             if (_relay != null)
             {
                 _relay.Dispose();
@@ -170,6 +172,34 @@ namespace FileXfer
         }
 
         private async Task HandleSafelyAsync(HttpListenerContext context)
+        {
+            // Do not create a feedback loop by recording the log shipment itself.
+            if (context.Request.Url != null && context.Request.Url.AbsolutePath == "/api/diagnostics") {
+                await HandleObservedAsync(context); return;
+            }
+            var stamp = Diagnostics.Stamp();
+            string route = DiagnosticRoute(context.Request.Url == null ? "" : context.Request.Url.AbsolutePath);
+            string client = Diagnostics.Id(context.Request.Headers["X-FileXfer-Trace"]);
+            Diagnostics.Sample("http.begin", route, 0, new { Client = client });
+            try { await HandleObservedAsync(context); }
+            finally { Diagnostics.Sample("http.end", route, Diagnostics.Milliseconds(stamp),
+                new { Client = client, Status = context.Response.StatusCode }); }
+        }
+
+        private static string DiagnosticRoute(string path)
+        {
+            switch (path) {
+                case "/api/status": case "/api/folder": case "/api/pick-folder": case "/api/pick-files":
+                case "/api/optical/start": case "/api/optical/stop": case "/api/optical/frames": case "/api/optical/frame":
+                case "/api/optical/receive/start": case "/api/optical/receive/stop": case "/api/optical/receive/frames": case "/api/optical/receive/frame":
+                case "/api/remotes/heartbeat": case "/api/remotes/command": case "/api/remotes/disconnect":
+                case "/api/remote-entry": case "/api/remote-entry/qr": case "/api/remotes": case "/api/devices":
+                case "/api/shutdown": return path;
+                default: return "asset_or_unknown";
+            }
+        }
+
+        private async Task HandleObservedAsync(HttpListenerContext context)
         {
             AddSecurityHeaders(context.Response);
             ErrorBody error = null;
@@ -186,26 +216,31 @@ namespace FileXfer
             }
             catch (DirectoryNotFoundException exception)
             {
+                Diagnostics.Failure("http", DiagnosticRoute(context.Request.Url.AbsolutePath), exception);
                 errorStatus = HttpStatusCode.BadRequest;
                 error = new ErrorBody(exception.Message);
             }
             catch (FileNotFoundException exception)
             {
+                Diagnostics.Failure("http", DiagnosticRoute(context.Request.Url.AbsolutePath), exception);
                 errorStatus = HttpStatusCode.BadRequest;
                 error = new ErrorBody(exception.Message);
             }
             catch (ArgumentException exception)
             {
+                Diagnostics.Failure("http", DiagnosticRoute(context.Request.Url.AbsolutePath), exception);
                 errorStatus = HttpStatusCode.BadRequest;
                 error = new ErrorBody(exception.Message);
             }
             catch (InvalidDataException exception)
             {
+                Diagnostics.Failure("http", DiagnosticRoute(context.Request.Url.AbsolutePath), exception);
                 errorStatus = HttpStatusCode.BadRequest;
                 error = new ErrorBody(exception.Message);
             }
             catch (UnauthorizedAccessException exception)
             {
+                Diagnostics.Failure("http", DiagnosticRoute(context.Request.Url.AbsolutePath), exception);
                 errorStatus = HttpStatusCode.Forbidden;
                 error = new ErrorBody(string.Format(
                     "このフォルダは開けません: {0}",
@@ -213,6 +248,7 @@ namespace FileXfer
             }
             catch (IOException exception)
             {
+                Diagnostics.Failure("http", DiagnosticRoute(context.Request.Url.AbsolutePath), exception);
                 errorStatus = HttpStatusCode.BadRequest;
                 error = new ErrorBody(string.Format(
                     "フォルダを読めません: {0}",
@@ -220,12 +256,7 @@ namespace FileXfer
             }
             catch (Exception exception)
             {
-                Console.Error.WriteLine(
-                    "{0:O} {1} {2}: {3}",
-                    DateTimeOffset.Now,
-                    context.Request.HttpMethod,
-                    context.Request.RawUrl,
-                    exception);
+                Diagnostics.Failure("http", DiagnosticRoute(context.Request.Url.AbsolutePath), exception);
                 error = new ErrorBody("FileXfer の処理中にエラーが起きました。");
             }
 
@@ -275,6 +306,29 @@ namespace FileXfer
             var request = context.Request;
             var path = request.Url == null ? "/" : request.Url.AbsolutePath;
             var role = GetRequestRole(request, _relay != null);
+
+            if (request.HttpMethod == "POST" && path == "/api/diagnostics")
+            {
+                // Same loopback/Tailscale listener and authentication boundary as the application.
+                // Custom header + JSON prevent simple cross-origin posts; no CORS permission is granted.
+                Uri origin;
+                var host = _relay != null ? request.Headers[LoopbackRelay.OriginalHostHeader] : request.Headers["Host"];
+                if (request.Headers["X-FileXfer-Diagnostics"] != "1"
+                    || !string.Equals((request.ContentType ?? "").Split(';')[0], "application/json", StringComparison.OrdinalIgnoreCase)
+                    || !Uri.TryCreate(request.Headers["Origin"], UriKind.Absolute, out origin)
+                    || (origin.Scheme != "http" && origin.Scheme != "https")
+                    || !string.Equals(origin.Authority, host, StringComparison.OrdinalIgnoreCase))
+                    throw new UnauthorizedAccessException("Diagnostic origin rejected");
+                if (!BrowserDiagnostics.TryEnter()) {
+                    await WriteJsonAsync(context, (HttpStatusCode)429, new { Saved = 0 }); return;
+                }
+                try {
+                    byte[] body = await ReadBodyAsync(request);
+                    int saved = await Task.Run(delegate { return BrowserDiagnostics.Save(body); });
+                    await WriteJsonAsync(context, HttpStatusCode.OK, new { Saved = saved });
+                } finally { BrowserDiagnostics.Leave(); }
+                return;
+            }
 
             if (request.HttpMethod == "GET" && path == "/api/status")
             {
