@@ -8,7 +8,7 @@ using System.Threading;
 namespace FileXfer
 {
     /// <summary>A V4L2 camera read through ffmpeg: raw BGRA frames on its standard output, one new buffer per frame.</summary>
-    internal sealed class FfmpegCamera : ICameraSource
+    internal sealed class FfmpegCamera : ICameraSource, IFocusHold
     {
         private readonly string _device;
         private readonly int _fps;
@@ -19,11 +19,13 @@ namespace FileXfer
         private volatile bool _stopped;
         private string _error, _errorTail = "";
         private long _frames;
+        private readonly V4l2FocusControl _focus;
 
         public FfmpegCamera(string device, int width, int fps)
         {
             if (device == null || !Regex.IsMatch(device, @"^/dev/video[0-9]+$")) throw new ArgumentException("カメラは /dev/videoN で指定してください。");
             _device = device; _fps = fps;
+            _focus = new V4l2FocusControl(device);
             Width = width; Height = width * 9 / 16;
             Name = DeviceName(device);
         }
@@ -43,6 +45,9 @@ namespace FileXfer
 
         public string Error { get { lock (_gate) return _error; } }
         public bool Running { get { return !_stopped && Error == null; } }
+
+        public void HoldFocus() { if (!_stopped && _process != null) _focus.Hold(); }
+        public void ReleaseFocus() { _focus.Release(); }
 
         public void Start(Action<byte[], int, int> frame)
         {
@@ -89,6 +94,7 @@ namespace FileXfer
                 lock (_gate) tail = _errorTail.Trim();
                 lock (_gate) _error = "カメラの映像が止まりました。カメラと撮影幅・fps を確かめてください。" + (tail.Length > 0 ? " (" + tail + ")" : "");
             }
+            finally { _focus.Dispose(); }
         }
 
         private void ReadErrors()
@@ -127,6 +133,7 @@ namespace FileXfer
         public void Dispose()
         {
             _stopped = true;
+            _focus.Dispose();
             var process = _process;
             if (process == null) return;
             try { if (!process.HasExited) process.Kill(true); } catch (Exception) { }

@@ -21,6 +21,16 @@ namespace FileXfer
         void Start(Action<byte[], int, int> frame);
     }
 
+    /// <summary>A camera whose focus can be held at its current setting (autofocus stopped) and handed back to
+    /// autofocus. Autofocus on a screen of fine detail wanders off and back for seconds at a time (C920 on FX2: from
+    /// 44 to 19 and stuck there); the receiver holds the focus while pictures read well and lets autofocus search
+    /// again when they stop. Cameras without this keep their own focus.</summary>
+    internal interface IFocusHold
+    {
+        void HoldFocus();
+        void ReleaseFocus();
+    }
+
     internal sealed class CameraInfo
     {
         public CameraInfo(string id, string name) { Id = id; Name = name; }
@@ -28,8 +38,10 @@ namespace FileXfer
         public string Name { get; private set; }
     }
 
-    /// <summary>Reads FileXfer QR frames from a camera: keeps the newest frame for the preview, decodes on worker
-    /// threads around the last QR position (with a periodic full search) and feeds the fountain decoder.</summary>
+    /// <summary>Reads FileXfer frames from a camera: keeps the newest frame for the preview, and on worker threads
+    /// reads every FX2 patch in the picture, or when no FX2 markers are in view, a QR code around the last QR
+    /// position (with a periodic full search); every frame read goes to the fountain decoder. The receiver needs no
+    /// setting for which the sender shows.</summary>
     internal sealed class CameraReceiver : IDisposable
     {
         public const string ReceiverId = "desktop-camera";
@@ -46,8 +58,22 @@ namespace FileXfer
         private OpticalReceiveResult _result;
         private string _error;
         private bool _stopped, _complete;
-        private long _captured, _decoded, _recognized;
+        private long _captured, _decoded, _recognized, _patches;
+        private int _markers, _patchesSeen;
+        private string _layout = "";
         private double _lastRecognizedMs = -1, _startedMs;
+        // Focus hold. A picture is sharp when most of its FX2 patches read without the blur correction (or a QR
+        // code reads); its quality is the patches read (1 for a QR code). The focus is held after three sharp
+        // pictures in a row whose quality is near the best seen (which fades by 1 % a second), not in the first
+        // seconds (the camera may open with the last session's focus); it is handed back to autofocus when for
+        // ReleaseAfterMs no picture keeps 60 % of the quality it was held at.
+        private const int HoldAfterGood = 3;
+        private const double ReleaseAfterMs = 2000, SettleMs = 2000;
+        private int _goodRun;
+        private bool _focusHeld;
+        private double _lastGoodMs, _bestQuality, _bestAt, _heldQuality;
+        private readonly double[] _recent = new double[3];
+        private int _recentCount;
         private double _lastCaptureMs = -1, _lastDecodeMs = -1;
         private Tracking _tracking;
 
@@ -97,7 +123,8 @@ namespace FileXfer
                 AutoRotate = false,
                 Options = new DecodingOptions { TryHarder = true, PossibleFormats = new List<BarcodeFormat> { BarcodeFormat.QR_CODE } }
             };
-            byte[] gray = new byte[0];
+            var fx2 = new Fx2Reader();
+            byte[] gray = new byte[0], full = new byte[0];
             while (true)
             {
                 byte[] frame; int width, height; long number; Tracking tracking;
@@ -108,15 +135,14 @@ namespace FileXfer
                     frame = _frame; width = _frameWidth; height = _frameHeight; number = _frameNumber; _takenNumber = number;
                     tracking = _tracking;
                 }
+                if (full.Length < width * height) full = new byte[width * height];
+                for (int i = 0, src = 0; i < width * height; i++, src += 4) full[i] = (byte)((frame[src] * 29 + frame[src + 1] * 150 + frame[src + 2] * 77) >> 8);
+                if (ReadFx2(fx2, full, width, height)) continue;
                 // Search near the last QR; every sixth frame (or after misses) the whole image, like the browser reader.
                 var region = Region(width, height, tracking, number, _clock.Elapsed.TotalMilliseconds);
                 int size = region.Width * region.Height;
                 if (gray.Length < size) gray = new byte[size];
-                for (int y = 0; y < region.Height; y++)
-                {
-                    int src = ((region.Y + y) * width + region.X) * 4, dst = y * region.Width;
-                    for (int x = 0; x < region.Width; x++, src += 4) gray[dst + x] = (byte)((frame[src] * 29 + frame[src + 1] * 150 + frame[src + 2] * 77) >> 8);
-                }
+                for (int y = 0; y < region.Height; y++) Buffer.BlockCopy(full, (region.Y + y) * width + region.X, gray, y * region.Width, region.Width);
                 var stamp = Diagnostics.Stamp();
                 Result result = null;
                 try { result = reader.Decode(new RGBLuminanceSource(gray, region.Width, region.Height, RGBLuminanceSource.BitmapFormat.Gray8)); }
@@ -141,6 +167,7 @@ namespace FileXfer
                     if (progress != null && progress.Recognized)
                     {
                         _recognized++;
+                        _layout = "qr";
                         _lastRecognizedMs = _clock.Elapsed.TotalMilliseconds;
                         _result = progress;
                         var points = result.ResultPoints;
@@ -154,7 +181,93 @@ namespace FileXfer
                     }
                     else if (_tracking != null) _tracking.Misses++;
                 }
+                bool readQr = progress != null && progress.Recognized;
+                Focus(readQr ? 1 : 0, readQr);
             }
+        }
+
+        /// <summary>Holds or releases the camera's focus after a picture (see the fields above).</summary>
+        private void Focus(double quality, bool sharp)
+        {
+            var camera = _camera as IFocusHold;
+            if (camera == null) return;
+            bool hold = false, release = false;
+            double average;
+            lock (_gate)
+            {
+                double now = _clock.Elapsed.TotalMilliseconds;
+                _recent[_recentCount++ % _recent.Length] = quality;
+                average = 0;
+                int n = Math.Min(_recentCount, _recent.Length);
+                for (int i = 0; i < n; i++) average += _recent[i];
+                average /= n;
+                _bestQuality *= Math.Pow(0.99, (now - _bestAt) / 1000); _bestAt = now;
+                if (average > _bestQuality) _bestQuality = average;
+                if (sharp && average >= 0.85 * _bestQuality) _goodRun++; else _goodRun = 0;
+                if (_focusHeld)
+                {
+                    if (quality >= 0.6 * _heldQuality) _lastGoodMs = now;
+                    else if (now - _lastGoodMs > ReleaseAfterMs) { _focusHeld = false; release = true; _goodRun = 0; }
+                }
+                else if (_goodRun >= HoldAfterGood && now - _startedMs >= SettleMs)
+                {
+                    _focusHeld = hold = true; _heldQuality = average; _lastGoodMs = now;
+                }
+            }
+            try
+            {
+                if (hold) { camera.HoldFocus(); Diagnostics.Event("camera.focus_hold", "native", new { Quality = average, Best = _bestQuality }); }
+                if (release) { camera.ReleaseFocus(); Diagnostics.Event("camera.focus_release", "native", new { Quality = quality, Held = _heldQuality }); }
+            }
+            catch (Exception error) { Diagnostics.Failure("camera.focus", "native", error); }
+        }
+
+        /// <summary>Reads the FX2 patches of one picture; false when no FX2 code is in view (the QR reader takes the
+        /// picture then).</summary>
+        private bool ReadFx2(Fx2Reader fx2, byte[] gray, int width, int height)
+        {
+            Fx2Reader.Result read;
+            try { read = fx2.Read(gray, width, height); }
+            catch (Exception error)
+            {
+                Diagnostics.Sample("camera.decode_exception", "native", 0, new { Type = error.GetType().Name, Code = error.HResult, Site = "CameraReceiver.ReadFx2" });
+                return false;
+            }
+            // FX2 is on screen when a patch reads, or when markers with matching IDs sit where neighbours should be
+            // (two patches' corners), even if no patch reads (focus, distance). Readable marker IDs alone are not
+            // enough: a QR code's finder and alignment patterns look like markers.
+            if (read.Frames.Count == 0 && read.Patches.Count < 2) return false;
+            // Sharp: at least three patches read, eight in ten of them without the blur correction.
+            Focus(read.Frames.Count, read.Frames.Count >= 3 && read.Plain * 10 >= read.Frames.Count * 8);
+            Diagnostics.Sample("camera.fx2_read", "native", read.Ms, new { Markers = read.Markers.Count, Patches = read.Patches.Count, Decoded = read.Frames.Count,
+                Corrected = read.Corrected, Candidates = read.Candidates, ThresholdMs = read.ThresholdMs, BlobMs = read.BlobMs, IdMs = read.IdMs, PatchMs = read.PatchMs });
+            OpticalReceiveResult progress = null;
+            string failure = null;
+            int recognized = 0;
+            foreach (var bytes in read.Frames)
+            {
+                try
+                {
+                    var result = _receiver.AddFrame(ReceiverId, bytes, _openWhenDone);
+                    if (result != null && result.Recognized) { recognized++; progress = result; if (result.Complete) break; }
+                }
+                catch (Exception error) { Diagnostics.Failure("camera.receive", "native", error); failure = error.Message; break; }
+            }
+            lock (_gate)
+            {
+                _decoded++;
+                _lastDecodeMs = _clock.Elapsed.TotalMilliseconds;
+                _layout = "fx2"; _markers = read.Markers.Count; _patchesSeen = read.Patches.Count; _patches += recognized;
+                if (failure != null) { _error = failure; Monitor.PulseAll(_gate); return true; }
+                if (progress != null)
+                {
+                    _recognized++;
+                    _lastRecognizedMs = _clock.Elapsed.TotalMilliseconds;
+                    if (_result == null || !_result.Complete) _result = progress;
+                    if (progress.Complete) { _complete = true; Monitor.PulseAll(_gate); }
+                }
+            }
+            return true;
         }
 
         private static byte[] Bytes(Result result)
@@ -204,6 +317,11 @@ namespace FileXfer
                     Captured = _captured,
                     Decoded = _decoded,
                     Recognized = _recognized,
+                    // What the camera last saw: "fx2" (markers, patches read in total, patches in the last picture) or "qr".
+                    Layout = _layout,
+                    Markers = _markers,
+                    Patches = _patches,
+                    PatchesSeen = _patchesSeen,
                     PreviewSequence = _previewSequence,
                     // Milliseconds since a FileXfer QR was last read (since start when none was read yet).
                     QuietMs = (long)(now - (_lastRecognizedMs >= 0 ? _lastRecognizedMs : _startedMs)),

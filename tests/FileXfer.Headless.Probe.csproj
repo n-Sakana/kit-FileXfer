@@ -8,7 +8,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="../src/**/*.cs" />
-    <Compile Include="../native/CameraReceiver.cs;../native/QrStream.cs;../native/NativeBitmap.cs" />
+    <Compile Include="../native/CameraReceiver.cs;../native/QrStream.cs;../native/Fx2Stream.cs;../native/NativeBitmap.cs" />
     <Reference Include="zxing"><HintPath>../lib/zxing.dll</HintPath><Private>true</Private></Reference>
     <Compile Include="NativeLoopbackProbe.cs" />
   </ItemGroup>

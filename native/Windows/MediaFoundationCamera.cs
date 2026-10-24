@@ -7,10 +7,15 @@ namespace FileXfer
 {
     /// <summary>Video capture through Media Foundation's source reader (raw COM vtables, Native AOT safe).
     /// The reader converts the camera's format to RGB32; frames are delivered as opaque BGRA.</summary>
-    internal sealed unsafe class MediaFoundationCamera : ICameraSource
+    internal sealed unsafe class MediaFoundationCamera : ICameraSource, IFocusHold
     {
         private readonly string _id;
-        private readonly int _wantedWidth, _wantedFps;
+        private readonly int _wantedWidth;
+        private readonly double _wantedFps;
+        private readonly CameraTuning _tuning;
+        private readonly object _controlGate = new object();
+        private readonly CameraFocusHold _focusHold;
+        private nint _source; // the live IMFMediaSource while capturing, for the camera controls
         private Thread _thread;
         private volatile bool _stop;
         private volatile bool _running;
@@ -18,8 +23,23 @@ namespace FileXfer
         private string _name = "";
         private int _width, _height;
         private double _fps;
+        // Opt-in laboratory hooks. Normal callers retain closest-format selection.
+        public int RequestedHeight { get; set; }
+        public bool RequireExactFormat { get; set; }
+        public event Action BeforeShutdown;
 
-        public MediaFoundationCamera(string id, int width, int fps) { _id = id ?? ""; _wantedWidth = width; _wantedFps = fps; }
+        public MediaFoundationCamera(string id, int width, int fps) : this(id, width, fps, null) { }
+        public MediaFoundationCamera(string id, int width, int fps, CameraTuning tuning) : this(id, width, (double)fps, tuning) { }
+        public MediaFoundationCamera(string id, int width, double fps, CameraTuning tuning)
+        {
+            _id = id ?? ""; _wantedWidth = width; _wantedFps = fps; _tuning = tuning;
+            _focusHold = new CameraFocusHold(_controlGate,
+                () => ReadControl(CameraControlFocus, true),
+                value => SetControl(true, CameraControlFocus, value, "focus"));
+        }
+
+        public void HoldFocus() { _focusHold.Hold(); }
+        public void ReleaseFocus() { _focusHold.Release(); }
 
         public string Name { get { return _name; } }
         public int Width { get { return _width; } }
@@ -52,6 +72,58 @@ namespace FileXfer
             return result;
         }
 
+        /// <summary>Opens the selected device briefly; enumerate advertised native types without starting capture.</summary>
+        public static List<CameraNativeFormat> ListFormats(string id)
+        {
+            var result = new List<CameraNativeFormat>();
+            bool com = CoInitializeEx(0, COINIT_MULTITHREADED) >= 0, mf = false;
+            void* source = null, reader = null;
+            try
+            {
+                Check(MFStartup(MF_VERSION, MFSTARTUP_LITE), "MFStartup"); mf = true;
+                void** devices = null; uint count = 0;
+                Check(EnumDevices(&devices, &count), "MFEnumDeviceSources");
+                try
+                {
+                    for (uint i = 0; i < count; i++)
+                    {
+                        if (ReadString(devices[i], ref MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_SYMBOLIC_LINK) != id) continue;
+                        Guid iid = IID_IMFMediaSource;
+                        Check(((delegate* unmanaged[Stdcall]<void*, Guid*, void**, int>)V(devices[i])[33])(devices[i], &iid, &source), "ActivateObject");
+                        break;
+                    }
+                }
+                finally { for (uint i = 0; i < count; i++) Release(devices[i]); CoTaskMemFree(devices); }
+                if (source == null) throw new CameraException("Selected camera was not found.");
+                Check(MFCreateSourceReaderFromMediaSource(source, null, &reader), "MFCreateSourceReaderFromMediaSource");
+                for (uint index = 0; ; index++)
+                {
+                    void* type = null;
+                    int hr = ((delegate* unmanaged[Stdcall]<void*, uint, uint, void**, int>)V(reader)[5])(reader, FIRST_VIDEO_STREAM, index, &type);
+                    if (hr == unchecked((int)0xC00D36B9)) break; // MF_E_NO_MORE_TYPES
+                    Check(hr, "GetNativeMediaType");
+                    try
+                    {
+                        ulong size, rate; Guid subtype;
+                        Check(GetUInt64(type, ref MF_MT_FRAME_SIZE, out size), "Get frame size");
+                        Check(GetUInt64(type, ref MF_MT_FRAME_RATE, out rate), "Get frame rate");
+                        Check(GetGuid(type, ref MF_MT_SUBTYPE, out subtype), "Get subtype");
+                        result.Add(new CameraNativeFormat { Index = (int)index, Width = (int)(size >> 32), Height = (int)(uint)size,
+                            FpsNumerator = (uint)(rate >> 32), FpsDenominator = (uint)rate, Subtype = subtype.ToString() });
+                    }
+                    finally { Release(type); }
+                }
+            }
+            finally
+            {
+                Release(reader);
+                if (source != null) { ((delegate* unmanaged[Stdcall]<void*, int>)V(source)[12])(source); Release(source); }
+                if (mf) MFShutdown();
+                if (com) CoUninitialize();
+            }
+            return result;
+        }
+
         public void Start(Action<byte[], int, int> frame)
         {
             _running = true;
@@ -81,6 +153,11 @@ namespace FileXfer
                     if (hr == unchecked((int)0x80070005)) throw new CameraException("カメラを使う許可がありません。Windows の設定の「プライバシーとセキュリティ」>「カメラ」で、デスクトップ アプリにカメラの使用を許可してください。");
                     if (hr == unchecked((int)0xC00D3704) || hr == unchecked((int)0x800700AA)) throw new CameraException("カメラを開けません。ほかのアプリが使っていないか確かめてください。");
                     Check(hr, "ActivateObject");
+                    lock (_controlGate)
+                    {
+                        _source = (nint)source;
+                        ApplyTuning(source);
+                    }
                 }
                 finally { for (uint i = 0; i < count; i++) Release(devices[i]); CoTaskMemFree(devices); }
 
@@ -89,6 +166,8 @@ namespace FileXfer
                 SetUInt32(attributes, ref MF_LOW_LATENCY, 1);
                 Check(MFCreateSourceReaderFromMediaSource(source, attributes, &reader), "MFCreateSourceReaderFromMediaSource");
                 ChooseFormat(reader);
+                Diagnostics.Event("camera.opened", "native", new { Camera = Diagnostics.Id(_name), Width = _width, Height = _height, Fps = _fps,
+                    Exposure = ReadControl(CameraControlExposure, true).ToString(), Focus = ReadControl(CameraControlFocus, true).ToString(), Gain = ReadControl(VideoProcAmpGain, false).ToString() });
                 while (!_stop)
                 {
                     uint stream, flags; long time; void* sample = null;
@@ -106,7 +185,12 @@ namespace FileXfer
             catch (Exception error) { Diagnostics.Failure("camera.mf", "native", error); _error = "カメラを使えません: " + error.Message; }
             finally
             {
+                // Restore our temporary hold before a laboratory hook restores its original settings.
+                StopFocus();
+                try { if (BeforeShutdown != null) BeforeShutdown(); }
+                catch (Exception error) { _error = "Camera cleanup: " + error.Message; }
                 _running = false;
+                lock (_controlGate) _source = 0;
                 if (reader != null) Release(reader);
                 if (attributes != null) Release(attributes);
                 if (source != null) { ((delegate* unmanaged[Stdcall]<void*, int>)V(source)[12])(source); Release(source); } // IMFMediaSource::Shutdown
@@ -131,19 +215,22 @@ namespace FileXfer
                     int w = (int)(size >> 32), h = (int)(size & 0xffffffff);
                     double fps = (uint)(rate & 0xffffffff) == 0 ? 0 : (double)(uint)(rate >> 32) / (uint)(rate & 0xffffffff);
                     if (w <= 0 || h <= 0 || w > 4096 || h > 4096) continue;
+                    if (RequireExactFormat && (w != _wantedWidth || (RequestedHeight > 0 && h != RequestedHeight) || Math.Abs(fps - _wantedFps) > 0.05)) continue;
                     double score = Math.Abs(w - _wantedWidth) * 10 + Math.Max(0, _wantedFps - fps) * 40 + Math.Max(0, fps - _wantedFps) + (w * 9 != h * 16 ? 30 : 0);
                     if (subtype == MFVideoFormat_MJPG) score += 5;
                     if (score < bestScore) { bestScore = score; bestIndex = (int)i; bw = w; bh = h; bfps = fps; }
                 }
                 finally { Release(type); }
             }
+            if (RequireExactFormat && bestIndex < 0) throw new CameraException("Requested camera resolution/fps is not supported.");
             if (bestIndex >= 0)
             {
                 void* native = null;
                 if (((delegate* unmanaged[Stdcall]<void*, uint, uint, void**, int>)V(reader)[5])(reader, FIRST_VIDEO_STREAM, (uint)bestIndex, &native) >= 0)
                 {
-                    ((delegate* unmanaged[Stdcall]<void*, uint, uint*, void*, int>)V(reader)[7])(reader, FIRST_VIDEO_STREAM, null, native); // SetCurrentMediaType
+                    int setHr = ((delegate* unmanaged[Stdcall]<void*, uint, uint*, void*, int>)V(reader)[7])(reader, FIRST_VIDEO_STREAM, null, native); // SetCurrentMediaType
                     Release(native);
+                    if (RequireExactFormat) Check(setHr, "SetCurrentMediaType native");
                 }
             }
             void* output = null;
@@ -166,6 +253,8 @@ namespace FileXfer
             }
             finally { Release(current); }
             if (_width <= 0 || _height <= 0) throw new CameraException("カメラの解像度を決められません。");
+            if (RequireExactFormat && (_width != _wantedWidth || (RequestedHeight > 0 && _height != RequestedHeight) || Math.Abs(_fps - _wantedFps) > 0.05))
+                throw new CameraException("Camera output differs from the requested resolution/fps.");
         }
 
         private byte[] Copy(void* sample)
@@ -200,11 +289,103 @@ namespace FileXfer
         public void Dispose()
         {
             _stop = true;
+            StopFocus();
             var thread = _thread;
             if (thread != null && thread != Thread.CurrentThread) thread.Join(3000);
         }
 
+        /// <summary>Wait for capture, shutdown hooks and device release to finish.</summary>
+        public bool WaitForStop(int milliseconds) { return _thread == null || _thread.Join(milliseconds); }
+
+        private void StopFocus()
+        {
+            try { _focusHold.Stop(); }
+            catch (Exception error) { Diagnostics.Failure("camera.focus.cleanup", "native", error); }
+        }
+
         private sealed class CameraException : Exception { public CameraException(string message) : base(message) { } }
+
+
+        // ---------------------------------------------------------------- camera controls (IAMCameraControl / IAMVideoProcAmp on the device source)
+        public const int CameraControlExposure = 4, CameraControlFocus = 6, VideoProcAmpBrightness = 0, VideoProcAmpGain = 9;
+        private const int ControlAuto = 1, ControlManual = 2;
+
+        private void ApplyTuning(void* source)
+        {
+            var tuning = _tuning;
+            if (tuning == null) return;
+            if (tuning.ExposureLog2.HasValue) SetControl(source, true, CameraControlExposure, tuning.ExposureLog2.Value, "exposure");
+            if (tuning.Focus.HasValue) SetControl(source, true, CameraControlFocus, tuning.Focus.Value, "focus");
+            if (tuning.Gain.HasValue) SetControl(source, false, VideoProcAmpGain, tuning.Gain.Value, "gain");
+        }
+
+        /// <summary>Set one control to a manual value (clamped to the device's range), or back to automatic when value is null.</summary>
+        public bool SetControl(bool cameraControl, int property, int? value, string what)
+        {
+            lock (_controlGate)
+            {
+                if (_source == 0) return false;
+                // Hold/Release run on decoder workers, not the capture thread that initialized COM.
+                bool com = CoInitializeEx(0, COINIT_MULTITHREADED) >= 0;
+                try { return SetControl((void*)_source, cameraControl, property, value, what); }
+                finally { if (com) CoUninitialize(); }
+            }
+        }
+
+        private static bool SetControl(void* source, bool cameraControl, int property, int? value, string what)
+        {
+            void* control = QueryControl(source, cameraControl);
+            if (control == null) { Diagnostics.Event("camera.control.unavailable", what, null); return false; }
+            try
+            {
+                int min, max, step, fallback, caps;
+                int hr = ((delegate* unmanaged[Stdcall]<void*, int, int*, int*, int*, int*, int*, int>)V(control)[3])(control, property, &min, &max, &step, &fallback, &caps); // GetRange
+                if (hr < 0) { Diagnostics.Event("camera.control.unsupported", what, new { Code = hr }); return false; }
+                int target = value.HasValue ? Math.Max(min, Math.Min(max, value.Value)) : fallback;
+                hr = ((delegate* unmanaged[Stdcall]<void*, int, int, int, int>)V(control)[4])(control, property, target, value.HasValue ? ControlManual : ControlAuto); // Set
+                Diagnostics.Event("camera.control.set", what, new { Value = target, Automatic = !value.HasValue, Code = hr });
+                return hr >= 0;
+            }
+            finally { Release(control); }
+        }
+
+        /// <summary>The device's current range, value and mode for one control (while the camera runs).</summary>
+        public CameraControlState ReadControl(int property, bool cameraControl)
+        {
+            lock (_controlGate)
+            {
+                if (_source == 0) return new CameraControlState();
+                bool com = CoInitializeEx(0, COINIT_MULTITHREADED) >= 0;
+                try { return ReadControl((void*)_source, property, cameraControl); }
+                finally { if (com) CoUninitialize(); }
+            }
+        }
+
+        private static CameraControlState ReadControl(void* source, int property, bool cameraControl)
+        {
+            var state = new CameraControlState();
+            void* control = QueryControl(source, cameraControl);
+            if (control == null) return state;
+            try
+            {
+                int min, max, step, fallback, caps, value, flags;
+                if (((delegate* unmanaged[Stdcall]<void*, int, int*, int*, int*, int*, int*, int>)V(control)[3])(control, property, &min, &max, &step, &fallback, &caps) < 0) return state;
+                if (((delegate* unmanaged[Stdcall]<void*, int, int*, int*, int>)V(control)[5])(control, property, &value, &flags) < 0) return state; // Get
+                state.Supported = true; state.Minimum = min; state.Maximum = max; state.Step = step; state.Default = fallback; state.Value = value; state.Automatic = (flags & ControlAuto) != 0; state.Capabilities = caps; state.Flags = flags;
+                return state;
+            }
+            finally { Release(control); }
+        }
+
+        private static void* QueryControl(void* source, bool cameraControl)
+        {
+            void* control = null;
+            Guid iid = cameraControl ? IID_IAMCameraControl : IID_IAMVideoProcAmp;
+            return ((delegate* unmanaged[Stdcall]<void*, Guid*, void**, int>)V(source)[0])(source, &iid, &control) >= 0 ? control : null;
+        }
+
+        private static readonly Guid IID_IAMCameraControl = new Guid("c6e13370-30ac-11d0-a18c-00a0c9118956");
+        private static readonly Guid IID_IAMVideoProcAmp = new Guid("c6e13360-30ac-11d0-a18c-00a0c9118956");
 
         // ---------------------------------------------------------------- Media Foundation (mfplat, mf, mfreadwrite)
         private const uint MF_VERSION = 0x00020070, MFSTARTUP_LITE = 1, COINIT_MULTITHREADED = 0, FIRST_VIDEO_STREAM = 0xFFFFFFFC;
@@ -285,5 +466,22 @@ namespace FileXfer
         [DllImport("ole32.dll", ExactSpelling = true)] private static extern int CoInitializeEx(nint reserved, uint coinit);
         [DllImport("ole32.dll", ExactSpelling = true)] private static extern void CoUninitialize();
         [DllImport("ole32.dll", ExactSpelling = true)] private static extern void CoTaskMemFree(void* memory);
+    }
+
+    internal sealed class CameraNativeFormat
+    {
+        public int Index, Width, Height;
+        public uint FpsNumerator, FpsDenominator;
+        public string Subtype;
+        public double Fps { get { return FpsDenominator == 0 ? 0 : (double)FpsNumerator / FpsDenominator; } }
+        public string SubtypeCode
+        {
+            get
+            {
+                var bytes = new Guid(Subtype).ToByteArray();
+                for (int i = 0; i < 4; i++) if (bytes[i] < 32 || bytes[i] > 126) return Subtype;
+                return System.Text.Encoding.ASCII.GetString(bytes, 0, 4);
+            }
+        }
     }
 }

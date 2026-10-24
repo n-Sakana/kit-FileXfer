@@ -1,18 +1,13 @@
 @echo off
-rem Builds runtime\windows-x64 (the MiniUI engine, from ..\miniUI or MINIUI_ROOT) and ui\MiniUI.App.dll (FileXfer's
-rem native component; MiniUI loads it from beside the start page).
+rem Builds FileXfer's launcher and native component using the MiniUI DLLs bundled in runtime\windows-x64.
 rem Needs the .NET 9 SDK and the Visual Studio C++ build tools (Native AOT). Users of the folder need neither.
 setlocal
 cd /d "%~dp0..\.."
-if "%MINIUI_ROOT%"=="" set "MINIUI_ROOT=%CD%\..\miniUI"
-if not exist "%MINIUI_ROOT%\tools\build.cmd" (echo MiniUI source not found: %MINIUI_ROOT% & exit /b 1)
+if not exist runtime\windows-x64\MiniUI.Engine.dll (echo Bundled MiniUI.Engine.dll is missing from runtime\windows-x64. & exit /b 1)
+if not exist runtime\windows-x64\MiniUI.Bridge.dll (echo Bundled MiniUI.Bridge.dll is missing from runtime\windows-x64. & exit /b 1)
 set "PATH=%PATH%;%ProgramFiles(x86)%\Microsoft Visual Studio\Installer"
-call "%MINIUI_ROOT%\tools\build.cmd" || exit /b 1
 dotnet publish native\FileXfer.Native.csproj -c Release -r win-x64 -nologo -v q -o artifacts\native-win-x64 || exit /b 1
 dotnet build launcher\FileXfer.Launcher.csproj -c Release -nologo -v q -o artifacts\launcher-win-x64 || exit /b 1
-if not exist runtime\windows-x64 mkdir runtime\windows-x64
-copy /y "%MINIUI_ROOT%\dist\windows-x64\aot\MiniUI.Engine.dll" runtime\windows-x64\ >nul || exit /b 1
-copy /y "%MINIUI_ROOT%\dist\windows-x64\aot\MiniUI.Bridge.dll" runtime\windows-x64\ >nul || exit /b 1
 copy /y artifacts\launcher-win-x64\FileXfer.Launcher.dll runtime\windows-x64\ >nul || exit /b 1
 if exist runtime\windows-x64\FileXfer.Native.dll del runtime\windows-x64\FileXfer.Native.dll
 copy /y artifacts\native-win-x64\FileXfer.Native.dll ui\MiniUI.App.dll >nul || exit /b 1

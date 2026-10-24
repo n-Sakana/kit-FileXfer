@@ -29,6 +29,7 @@ namespace FileXfer
         private readonly OpticalService _optical = new OpticalService();
         private OpticalReceiveService _receiver;
         private QrStream _qr;
+        private Fx2Stream _fx2;
         private CameraReceiver _camera;
         private FolderSnapshot _folder;
         private readonly HashSet<string> _selected = new HashSet<string>(StringComparer.Ordinal);
@@ -39,6 +40,8 @@ namespace FileXfer
         private ScaledQr _pairing;
         private int _raised;
         private string _tailnet = "";
+        private AutoSendOptions _autoSend;
+        private AutoReceiveOptions _autoReceive;
 
         public string Call(string input)
         {
@@ -59,8 +62,9 @@ namespace FileXfer
             if (op != "poll" && op != "job" && op != "receive.status" && op != "diagnostics")
                 Diagnostics.Sample("native.operation", SafeOperation(op), 0, null);
             if (op == "diagnostics") {
-                var qr = _qr;
-                Diagnostics.Sample("send.ui_tick", qr == null ? "" : qr.TransferId, 0, new { Sequence = Int(r, "sequence"), Scale = Int(r, "scale"), Frames = Int(r, "frames") });
+                var qr = _qr; var fx2 = _fx2;
+                Diagnostics.Sample("send.ui_tick", qr != null ? qr.TransferId : fx2 != null ? fx2.TransferId : "", 0,
+                    new { Sequence = Int(r, "sequence"), Scale = Int(r, "scale"), Frames = Int(r, "frames") });
                 return new { Ok = true };
             }
             if (op == "init") return Init(r);
@@ -75,7 +79,10 @@ namespace FileXfer
                 case "selectAll": return SelectAll(Bool(r, "on"));
                 case "pickFiles": return StartJob("pickFiles", () => Pick(false));
                 case "pickFolder": return StartJob("pickFolder", () => Pick(true));
-                case "send.start": return StartJob("send.start", () => StartSending(Int(r, "frameBytes"), Int(r, "fps"), Text(r, "ec")));
+                case "send.start":
+                    if (OptionalText(r, "layout") == "fx2") return StartJob("send.start", () => StartFx2(Int(r, "fps"), Text(r, "ec")));
+                    return StartJob("send.start", () => StartSending(Int(r, "frameBytes"), Int(r, "fps"), Text(r, "ec"), Int(r, "columns", 1), Int(r, "rows", 1)));
+                case "send.fx2layout": return DescribeFx2Layout(Int(r, "width"), Int(r, "height"), Int(r, "cell"), Int(r, "coarse", 0));
                 case "send.stop": StopSending(); return new { Stopped = true };
                 case "cameras": return new { Cameras = Cameras() };
                 case "receive.start": return StartReceiving(OptionalText(r, "camera"), Int(r, "width"), Int(r, "fps"), Int(r, "workers"), Bool(r, "openWhenDone"));
@@ -92,7 +99,7 @@ namespace FileXfer
         private static string SafeOperation(string op) {
             switch (op) {
                 case "init": case "folder": case "folder.reload": case "select": case "selectAll":
-                case "pickFiles": case "pickFolder": case "send.start": case "send.stop": case "cameras":
+                case "pickFiles": case "pickFolder": case "send.start": case "send.stop": case "send.fx2layout": case "cameras":
                 case "receive.start": case "receive.stop": case "openFolder": case "remote.entry":
                 case "remote.list": case "remote.command": case "poll": case "job": case "receive.status": case "diagnostics": return op;
                 default: return "unknown";
@@ -121,6 +128,8 @@ namespace FileXfer
                 _home = _home ?? Path.GetFullPath(AppContext.BaseDirectory);
                 _output = _output ?? Path.Combine(_home, "output");
                 _port = options.Port;
+                _autoSend = options.AutoSend;
+                _autoReceive = options.AutoReceive;
                 _receiver = new OpticalReceiveService(_output);
                 string pathError = null;
                 try { _state = new AppState(options.InitialPath); }
@@ -130,7 +139,7 @@ namespace FileXfer
                 LoadFolder(true);
                 _initialized = true;
                 var result = Describe();
-                if (pathError != null) return new { result.Device, result.Platform, result.Version, result.OutputRoot, result.Port, result.Server, result.ServerError, PathError = pathError };
+                if (pathError != null) return new { result.Device, result.Platform, result.Version, result.OutputRoot, result.Port, result.Server, result.ServerError, result.AutoSend, result.AutoReceive, PathError = pathError };
                 return result;
             }
         }
@@ -146,7 +155,12 @@ namespace FileXfer
                 OutputRoot = _output,
                 Port = _port,
                 Server = _server != null,
-                ServerError = _serverError
+                ServerError = _serverError,
+                AutoSend = _autoSend == null ? null : new { Fps = _autoSend.FramesPerSecond, FrameBytes = _autoSend.FrameBytes,
+                    Ec = _autoSend.ErrorCorrection, QrSize = _autoSend.QrSize, Columns = _autoSend.Columns, Rows = _autoSend.Rows,
+                    Layout = _autoSend.Layout, Cell = _autoSend.Cell, Coarse = _autoSend.Coarse,
+                    KeystoneX = _autoSend.KeystoneX, KeystoneY = _autoSend.KeystoneY },
+                AutoReceive = _autoReceive == null ? null : new { Camera = _autoReceive.Camera, Width = _autoReceive.Width, Fps = _autoReceive.FramesPerSecond, Workers = _autoReceive.Workers }
             };
         }
 
@@ -159,6 +173,10 @@ namespace FileXfer
             public int Port { get; set; }
             public bool Server { get; set; }
             public string ServerError { get; set; }
+            /// <summary>The --send settings, or null when the window starts normally.</summary>
+            public object AutoSend { get; set; }
+            /// <summary>The --receive settings, or null when the window starts normally.</summary>
+            public object AutoReceive { get; set; }
         }
 
         /// <summary>The local server is what the phone talks to. A FileXfer already running on the port is replaced,
@@ -348,29 +366,60 @@ namespace FileXfer
 
         // ---------------------------------------------------------------- sending
 
-        private object StartSending(int frameBytes, int fps, string ec)
+        /// <summary>Starts a display session. columns x rows QR codes are shown at once (each one an independent
+        /// fountain frame, so the receiver needs nothing new in the protocol); the page advances the sequence by
+        /// that many per display tick.</summary>
+        private object StartSending(int frameBytes, int fps, string ec, int columns, int rows)
+        {
+            FolderSnapshot folder; List<string> names;
+            lock (_gate) { folder = _folder; names = SelectedNames(); }
+            if (names.Count == 0) throw new ArgumentException("送るファイルを選んでください。");
+            if (columns < 1 || columns > TiledQr.MaximumColumns || rows < 1 || rows > TiledQr.MaximumRows) throw new ArgumentException("並べる枚数が正しくありません。");
+            StopSending();
+            var result = _optical.Start(folder, names, frameBytes, fps, ec);
+            lock (_gate) _qr = new QrStream(_optical, result.Token);
+            Diagnostics.Event("send.layout", result.TransferId, new { Columns = columns, Rows = rows, Gap = TiledQr.Gap });
+            return new
+            {
+                result.TransferId, result.Token, result.Label, result.FileCount, result.OriginalBytes, result.FrameBytes, result.FramesPerSecond,
+                result.ErrorCorrection, result.SourceBlocks, result.QrVersion, result.MinimumSeconds,
+                Side = 17 + 4 * result.QrVersion + 8,
+                Columns = columns, Rows = rows, Gap = TiledQr.Gap
+            };
+        }
+
+        /// <summary>Starts an FX2 display session. The page asks for the layout of its window (send.fx2layout) and
+        /// advances the sequence by that layout's patch count per display tick.</summary>
+        private object StartFx2(int fps, string ec)
         {
             FolderSnapshot folder; List<string> names;
             lock (_gate) { folder = _folder; names = SelectedNames(); }
             if (names.Count == 0) throw new ArgumentException("送るファイルを選んでください。");
             StopSending();
-            var result = _optical.Start(folder, names, frameBytes, fps, ec);
-            lock (_gate) _qr = new QrStream(_optical, result.Token);
+            var result = _optical.StartFx2(folder, names, fps, ec);
+            lock (_gate) _fx2 = new Fx2Stream(_optical, result.Token, ec);
             return new
             {
                 result.TransferId, result.Token, result.Label, result.FileCount, result.OriginalBytes, result.FrameBytes, result.FramesPerSecond,
-                result.ErrorCorrection, result.SourceBlocks, result.QrVersion, result.MinimumSeconds,
-                Side = 17 + 4 * result.QrVersion + 8
+                result.ErrorCorrection, result.SourceBlocks, Layout = "fx2"
             };
+        }
+
+        private object DescribeFx2Layout(int width, int height, int cell, int coarse)
+        {
+            Fx2Stream fx2;
+            lock (_gate) fx2 = _fx2;
+            if (fx2 == null) throw new InvalidOperationException("Tile を表示していません。");
+            var layout = fx2.Layout(width, height, cell, coarse);
+            return new { layout.Width, layout.Height, layout.Patches, Coarse = layout.Coarse, Tiers = layout.Tiers.Length };
         }
 
         private void StopSending()
         {
-            QrStream qr;
-            lock (_gate) { qr = _qr; _qr = null; }
-            if (qr == null) return;
-            qr.Dispose();
-            _optical.Stop(qr.Token);
+            QrStream qr; Fx2Stream fx2;
+            lock (_gate) { qr = _qr; _qr = null; fx2 = _fx2; _fx2 = null; }
+            if (qr != null) { qr.Dispose(); _optical.Stop(qr.Token); }
+            if (fx2 != null) { fx2.Dispose(); _optical.Stop(fx2.Token); }
         }
 
         // ---------------------------------------------------------------- receiving
@@ -431,8 +480,11 @@ namespace FileXfer
 
         // ---------------------------------------------------------------- app: images
 
-        /// <summary>Pixels for &lt;img src="app:NAME"&gt;: qr?t=TOKEN&amp;s=SEQ&amp;m=SCALE, camera?n=N, pairing?m=SCALE.
-        /// m is the number of image pixels per QR module. Null when absent.</summary>
+        /// <summary>Pixels for &lt;img src="app:NAME"&gt;: qr?t=TOKEN&amp;s=SEQ&amp;m=SCALE[&amp;c=COLS&amp;r=ROWS],
+        /// fx2?t=TOKEN&amp;s=SEQ&amp;w=WIDTH&amp;h=HEIGHT&amp;m=CELL[&amp;k=COARSE], camera?n=N, pairing?m=SCALE. m is the
+        /// number of image pixels per QR module or FX2 cell; c and r lay out consecutive QR frames SEQ, SEQ+1, ... side
+        /// by side; an FX2 picture's patches carry SEQ, SEQ+1, ... qr and fx2 take kx and ky (thousandths) to draw
+        /// the picture as a trapezoid for measurements. Null when absent.</summary>
         public IAppImage Image(string name)
         {
             string path = name, query = "";
@@ -446,7 +498,18 @@ namespace FileXfer
                         lock (_gate) qr = _qr;
                         uint seq;
                         if (qr == null || Query(query, "t") != qr.Token || !uint.TryParse(Query(query, "s"), NumberStyles.None, CultureInfo.InvariantCulture, out seq)) return null;
-                        return qr.Frame(seq, Scale(query));
+                        return Keystone(qr.Tiles(seq, Scale(query), Count(query, "c", TiledQr.MaximumColumns), Count(query, "r", TiledQr.MaximumRows)), query);
+                    }
+                case "fx2":
+                    {
+                        Fx2Stream fx2;
+                        lock (_gate) fx2 = _fx2;
+                        uint seq;
+                        if (fx2 == null || Query(query, "t") != fx2.Token || !uint.TryParse(Query(query, "s"), NumberStyles.None, CultureInfo.InvariantCulture, out seq)) return null;
+                        int width = Count(query, "w", 16384), height = Count(query, "h", 16384), cell = Count(query, "m", Fx2Layout.MaximumCell), coarse = Count(query, "k", 4);
+                        if ((long)width * height > 64L * 1024 * 1024 / 4) return null;
+                        var layout = fx2.Layout(width, height, cell, coarse);
+                        return Keystone(new Fx2Image(fx2.Picture(seq, layout)), query);
                     }
                 case "camera": { var camera = _camera; return camera == null ? null : camera.Preview; }
                 case "pairing": { ScaledQr pairing; lock (_gate) pairing = _pairing; return pairing == null ? null : pairing.WithScale(Scale(query)); }
@@ -458,6 +521,21 @@ namespace FileXfer
         {
             int scale;
             return int.TryParse(Query(query, "m"), NumberStyles.None, CultureInfo.InvariantCulture, out scale) ? Math.Max(1, Math.Min(64, scale)) : 1;
+        }
+
+        private static IAppImage Keystone(IAppImage image, string query)
+        {
+            int kx, ky;
+            int.TryParse(Query(query, "kx"), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out kx);
+            int.TryParse(Query(query, "ky"), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out ky);
+            if (kx == 0 && ky == 0) return image;
+            return new KeystoneImage(image, Math.Max(-900, Math.Min(900, kx)) / 1000.0, Math.Max(-900, Math.Min(900, ky)) / 1000.0);
+        }
+
+        private static int Count(string query, string key, int maximum)
+        {
+            int count;
+            return int.TryParse(Query(query, key), NumberStyles.None, CultureInfo.InvariantCulture, out count) ? Math.Max(1, Math.Min(maximum, count)) : 1;
         }
 
         private static string Query(string query, string key)

@@ -1443,19 +1443,24 @@
     var percent = Math.max(0, Math.min(100, Math.round(Number(result.progress || 0) * 100)));
     document.getElementById("receiveProgressBar").style.width = percent + "%";
     document.getElementById("receiveProgress").setAttribute("aria-valuenow", String(percent));
-    document.getElementById("receiveState").textContent = result.complete ? "受け取りました" : "受け取っています " + percent + "%";
-    document.getElementById("receiveRate").textContent = formatRate(result.kilobytesPerSecond);
-    var elapsed = Number(result.elapsedSeconds || 0);
-    var progress = Number(result.progress || 0);
-    var remaining = progress > 0 && progress < 1 ? elapsed * (1 - progress) / progress : 0;
-    document.getElementById("receiveEta").textContent = result.complete
-      ? "合計 " + formatSeconds(elapsed)
-      : remaining > 0
-        ? "残り " + formatSeconds(remaining)
-        : "";
-    document.getElementById("receiveDetail").textContent =
-      Number(result.solvedBlocks || 0).toLocaleString("ja-JP") + " / " +
-      Number(result.sourceBlocks || 0).toLocaleString("ja-JP") + " ブロック";
+    // The numbers people read change at most once a second (the bar follows every result); the last one at once.
+    var now = Date.now();
+    if (result.complete || !state.receiveShownAt || now - state.receiveShownAt >= 1000) {
+      state.receiveShownAt = now;
+      document.getElementById("receiveState").textContent = result.complete ? "受け取りました" : "受け取っています " + percent + "%";
+      document.getElementById("receiveRate").textContent = formatRate(result.kilobytesPerSecond);
+      var elapsed = Number(result.elapsedSeconds || 0);
+      var progress = Number(result.progress || 0);
+      var remaining = progress > 0 && progress < 1 ? elapsed * (1 - progress) / progress : 0;
+      document.getElementById("receiveEta").textContent = result.complete
+        ? "合計 " + formatSeconds(elapsed)
+        : remaining > 0
+          ? "残り " + formatSeconds(remaining)
+          : "";
+      document.getElementById("receiveDetail").textContent =
+        Number(result.solvedBlocks || 0).toLocaleString("ja-JP") + " / " +
+        Number(result.sourceBlocks || 0).toLocaleString("ja-JP") + " ブロック";
+    }
 
     if (!result.complete) {
       armCameraQuietHint(state.cameraGeneration, 4000);
@@ -1538,6 +1543,7 @@
     document.getElementById("receiveProgress").setAttribute("aria-valuenow", "0");
     document.getElementById("receiveDetail").textContent = "";
     document.getElementById("receiveEta").textContent = "";
+    state.receiveShownAt = 0;
     document.getElementById("cameraNoSignal").hidden = true;
     document.getElementById("receiveResult").hidden = true;
   }

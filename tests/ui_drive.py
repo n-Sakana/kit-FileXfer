@@ -154,8 +154,8 @@ def main() -> int:
     if args.linux:
         launcher = ROOT / "FileXfer.sh"
     if launcher is None:
-        # A temporary miniui.cmd beside the runtime DLLs (the launcher MiniUI's build generates).
-        miniui_cmd = ROOT.parent / "miniUI" / "dist" / "windows-x64" / "aot" / "miniui.cmd"
+        # The test launcher and DLLs are all bundled in FileXfer.
+        miniui_cmd = ROOT / "tests" / "miniui.cmd"
         temp_runtime = work / "runtime"
         shutil.copytree(runtime, temp_runtime)
         shutil.copy(miniui_cmd, temp_runtime / "miniui.cmd")

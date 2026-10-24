@@ -1,5 +1,46 @@
 # FileXfer のテスト
 
+C920 の実カメラ測定装置は [CameraLab.md](CameraLab.md) を参照してください。
+解像度・fps・露出・ピント・ゲイン、読取率・新規/重複QR・マス幅・行差分・AF固定比較を記録します。
+
+ピント固定の共通処理は、窓・カメラなしで確認できます。
+
+```bash
+dotnet run --project tests/FileXfer.FocusHold.csproj -c Release --artifacts-path <出力先>
+```
+
+現在値での固定、再固定、AF復帰、手動設定・非対応機器の維持、設定失敗時の復帰、
+終了時の再試行、複数workerと終了の競合を確認します。Windows実機はCameraLabの
+`focus-hold OUT [CAMERA]` で別途確認します。LinuxのV4L2実機動作はこの共通試験には含みません。
+
+## Tile
+
+`FileXfer.Fx2Lab.csproj` はカメラなしの Tile の試験です。製品の `Fx2` / `Fx2Reader` / Fountain をそのまま使います。
+
+```bash
+dotnet build tests/FileXfer.Fx2Lab.csproj -c Release --artifacts-path <出力先>
+dotnet <出力先>/bin/FileXfer.Fx2Lab/release/FileXfer.Fx2Lab.dll selftest
+dotnet <...>/FileXfer.Fx2Lab.dll sim --screen 1920x1050 --cell 3 --coarse 2 --scale 1.26 --blur 0.8 --noise 3 --frames 120
+dotnet <...>/FileXfer.Fx2Lab.dll pgm tests/results/fx2-20261021/S1 [--out <重ね描きの出力先>]
+```
+
+- `selftest`：Golay 符号（最小距離 8・3 ビット訂正）、ID 環の 8 方向、パッチの往復・訂正・拒否、レイアウト、
+  きれいな絵の全パッチ復号、QR の絵を Tile と取り違えないこと。
+- `sim`：合成カメラ（射影・歪み・ぼけ・雑音・露光と両側のローリングシャッター・一部だけ写る）で乱数の内容を受け取り、
+  一致と所要時間・1 コマの復号数を出します。
+- `pgm`：CameraLab の `--save-all` などで保存した 8 bit PGM を読み、コマごとのマーカー・パッチ・段ごとの復号数・処理時間と、
+  2 秒あたりの異なるパッチ数・セルのカメラ画素数を出します。`--out` は検出結果の重ね描き（PPM）。
+
+`NativeLoopbackProbe`（Headless / MiniUI Probe）は QR に続いて Tile も、送り手の `Fx2Stream` / `Fx2Image` から
+受け手の `CameraReceiver` を通し、受け取ったファイルが元と一致することを確かめます。
+
+`receive_report.py` は診断ログ（trace-*.jsonl）から受信ごとに、所要時間、速さ（送った量 / 秒）、撮影・読取り数、
+新規／重複フレーム、停止（5 秒区間で新規 5 以下が 10 秒以上続く）を出します。`--table` で 5 秒ごとの表も出します。
+
+```bash
+python tests/receive_report.py tests/results/fx2-20261021/R1 [--table]
+```
+
 .NET SDK 9、Node.js、Python と `tests/requirements.txt` のパッケージを使います。
 Chromium/Chrome が必要です。別の実行ファイルを使うときは `PLAYWRIGHT_CHROMIUM_EXECUTABLE` を指定します。
 
@@ -24,7 +65,7 @@ JavaScript は20件です。ブラウザ回帰試験は実 WASM と合成 QR／�
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\test-desktop-context.ps1
 ```
 
-デスクトップの画面とネイティブ部品は次で確認します。どちらも隣のフォルダの miniUI ソースを使います。
+デスクトップの画面とネイティブ部品は次で確認します。FileXfer に同梱した MiniUI の DLL を使います。
 
 ```bash
 dotnet run --project tests/FileXfer.MiniUI.Probe.csproj -c Release
@@ -36,6 +77,14 @@ python3 tests/ui_drive.py --linux      # Linux: ./FileXfer.sh を使う
 デスクトップの受信処理（CameraReceiver）に渡し、受け取ったファイルが元と一致することを確かめます。
 `ui_drive.py` は MiniUI の MCP で画面を操作し、送る・受け取る・スマホ・QR 表示をライトとダークで
 `tests/results/screens` に保存します。
+
+2026-10-20：MiniUI の repo と部品ビルド用ソースを bubblewrap のマウント名前空間内で隠し、
+ビルドキャッシュの無い FileXfer の写しから `./FileXfer` のビルド・起動を確認しました。
+独立した Xvfb 上で、フォルダ選択ボタン→実 zenity ダイアログの OK→README.md の選択、
+選択解除・再選択、QR 表示・停止、送受信／スマホ画面の切替、テーマ切替、終了コード0とポート閉鎖を確認。
+同じ隔離環境で `FileXfer.MiniUI.Probe.csproj` も PASS（合成画像118枚、4.9秒、受信4ファイルが元と一致）。
+記録と画像はローカルの `tests/results/miniui-bundled-20261020/`。Windows の更新後ビルド・起動、
+通常デスクトップの portal 経路、実カメラ・実スマホはこの確認に含みません。
 
 ## 診断ログの隔離確認
 
@@ -70,9 +119,9 @@ PCへ自動保存されることを確認します。回収用のコンソール
 実workerのWASM取得503、原因の安全な記録、同origin検査・容量制限・秘密値除去も確認します。
 使用するXvfb、アプリ、ブラウザだけを起動し、それぞれ自分のPIDで片づけます。物理カメラは使いません。
 
-Linux MiniUIは既存配布物の `MINIUI_SOURCE_REVISION` に記録された `c0cc050` のソース入力でビルド・隔離起動を確認。
-現在のMiniUI HEADではLinuxFetcher／Engine API変更によりFileXferの既存ホストがビルドできません。
-今回MiniUIやホストのAPI適応は変更していません。
+10/19 のログ実装確認では、Linux MiniUI は `c0cc050` のソース入力でビルド・隔離起動を確認しました。
+10/20 にホストの API を適応し、MiniUI の参照を `runtime/linux-x64` の DLL に切り替えました。
+現在の同梱版は `runtime/linux-x64/MINIUI_SOURCE_REVISION` に記録しています。
 Windows Native AOT配布物・PowerShell 5.1での起動、物理カメラ・スマホ実機・Tailscale実接続は別途確認が必要です。
 
 `FileXfer.Shutdown.csproj` は隔離フォルダ・専用ポートでNativeAppの実サーバを起動し、

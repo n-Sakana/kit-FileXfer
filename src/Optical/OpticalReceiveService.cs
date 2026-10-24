@@ -15,6 +15,20 @@ namespace FileXfer
             new Dictionary<string, OpticalReceiveState>(StringComparer.Ordinal);
         private readonly Dictionary<string, DateTime> _stopped =
             new Dictionary<string, DateTime>(StringComparer.Ordinal);
+        // Per receiver: the one other transfer whose frames have been arriving without a break, if any.
+        private readonly Dictionary<string, ForeignTransfer> _foreign =
+            new Dictionary<string, ForeignTransfer>(StringComparer.Ordinal);
+
+        /// <summary>A receiver moves to another transfer when its own has sent nothing for this long and, all that
+        /// time, frames of that one other transfer (and of no third one) kept coming. While both are in view it stays.</summary>
+        internal static TimeSpan SwitchAfter = TimeSpan.FromSeconds(5);
+        private static readonly TimeSpan ForeignGap = TimeSpan.FromSeconds(2);
+
+        private sealed class ForeignTransfer
+        {
+            public string Key;
+            public DateTime FirstUtc, LastUtc;
+        }
         private readonly string _outputRoot;
 
         public OpticalReceiveService(string outputRoot)
@@ -32,6 +46,7 @@ namespace FileXfer
                 Diagnostics.Event("receive.reset", Diagnostics.Id(receiverId), new { Previous = previous == null ? null : previous.TransferId });
                 _receivers.Remove(receiverId);
                 _stopped.Remove(receiverId);
+                _foreign.Remove(receiverId);
             }
         }
 
@@ -100,13 +115,26 @@ namespace FileXfer
                     Diagnostics.Event("receive.session", state.TransferId, new { Receiver = Diagnostics.Id(receiverId) });
                 }
 
-                state.LastSeenUtc = DateTime.UtcNow;
-                // A delayed worker or a second QR in view must not erase collected blocks.
+                var now = DateTime.UtcNow;
+                state.LastSeenUtc = now;
+                // A delayed worker or a second code in view must not erase collected blocks: frames of another
+                // transfer are set aside, unless the sender has changed (see SwitchAfter).
                 if (!state.Matches(frame)) {
-                    Diagnostics.Sample("receive.reject.session", state.TransferId, 0, new { Receiver = Diagnostics.Id(receiverId),
-                        Incoming = Diagnostics.Transfer(frame.SessionId, frame.BlockCount, frame.BlockLength, frame.TotalLength) });
-                    return OpticalReceiveResult.NotRecognized();
+                    var incoming = Diagnostics.Transfer(frame.SessionId, frame.BlockCount, frame.BlockLength, frame.TotalLength);
+                    if (!SwitchTo(receiverId, state, frame, incoming, now))
+                    {
+                        Diagnostics.Sample("receive.reject.session", state.TransferId, 0, new { Receiver = Diagnostics.Id(receiverId), Incoming = incoming });
+                        return OpticalReceiveResult.NotRecognized();
+                    }
+                    var switches = state.Switches + 1;
+                    Diagnostics.Event("receive.switched", incoming, new { Receiver = Diagnostics.Id(receiverId), From = state.TransferId, Switches = switches });
+                    state = new OpticalReceiveState(frame);
+                    state.Switches = switches;
+                    _receivers[receiverId] = state;
+                    Diagnostics.Event("receive.session", state.TransferId, new { Receiver = Diagnostics.Id(receiverId) });
                 }
+                state.LastMatchUtc = now;
+                _foreign.Remove(receiverId);
 
                 if (state.CompletedResult != null)
                 {
@@ -176,6 +204,22 @@ namespace FileXfer
             }
         }
 
+        /// <summary>Whether a frame of another transfer takes the receiver over: its own transfer has sent nothing
+        /// for SwitchAfter and frames of this one other transfer have kept coming (gaps under ForeignGap) for as
+        /// long. A third transfer, or a break, starts the count again.</summary>
+        private bool SwitchTo(string receiverId, OpticalReceiveState state, OpticalFrame frame, string incoming, DateTime now)
+        {
+            string key = incoming + ":" + frame.PayloadFnv.ToString(CultureInfo.InvariantCulture);
+            ForeignTransfer foreign;
+            if (!_foreign.TryGetValue(receiverId, out foreign) || foreign.Key != key || now - foreign.LastUtc > ForeignGap)
+            {
+                foreign = new ForeignTransfer { Key = key, FirstUtc = now };
+                _foreign[receiverId] = foreign;
+            }
+            foreign.LastUtc = now;
+            return now - state.LastMatchUtc >= SwitchAfter && now - foreign.FirstUtc >= SwitchAfter;
+        }
+
         private static string RequireReceiverId(string value)
         {
             if (string.IsNullOrWhiteSpace(value) || value.Length > 100)
@@ -216,6 +260,7 @@ namespace FileXfer
             TransferId = Diagnostics.Transfer(_sessionId, _blockCount, _blockLength, _totalLength);
             _startedUtc = DateTime.UtcNow;
             LastSeenUtc = _startedUtc;
+            LastMatchUtc = _startedUtc;
             Decoder = new FountainDecoder(
                 _blockCount,
                 _blockLength,
@@ -226,6 +271,10 @@ namespace FileXfer
         public string TransferId { get; private set; }
         public DateTime LastProgressUtc = DateTime.UtcNow;
         public DateTime LastSeenUtc { get; set; }
+        /// <summary>When a frame of this transfer last came.</summary>
+        public DateTime LastMatchUtc { get; set; }
+        /// <summary>How many times this receiver moved to another transfer before this one.</summary>
+        public int Switches { get; set; }
         public void ReleaseDecoder() { Decoder = null; }
         public FountainDecoder Decoder { get; private set; }
         public OpticalReceiveResult CompletedResult { get; set; }
@@ -250,7 +299,7 @@ namespace FileXfer
             var solved = 0.99 * Decoder.SolvedCount / _blockCount;
             var progress = Math.Max(arrival, solved);
             var rate = Decoder.FramesNew * _blockLength / overhead / 1024.0 / elapsed;
-            return new OpticalReceiveResult(
+            return WithSwitches(new OpticalReceiveResult(
                 true,
                 false,
                 Decoder.FramesNew,
@@ -264,7 +313,13 @@ namespace FileXfer
                 null,
                 0,
                 null,
-                null);
+                null));
+        }
+
+        private OpticalReceiveResult WithSwitches(OpticalReceiveResult result)
+        {
+            result.Switches = Switches;
+            return result;
         }
 
         public OpticalReceiveResult DescribeComplete(
@@ -272,7 +327,7 @@ namespace FileXfer
             string openError)
         {
             var elapsed = Math.Max(0.001, (DateTime.UtcNow - _startedUtc).TotalSeconds);
-            return new OpticalReceiveResult(
+            return WithSwitches(new OpticalReceiveResult(
                 true,
                 true,
                 Decoder.FramesNew,
@@ -286,7 +341,7 @@ namespace FileXfer
                 saved.Label,
                 saved.FileCount,
                 saved.OutputPath,
-                openError);
+                openError));
         }
     }
 
@@ -338,6 +393,8 @@ namespace FileXfer
         public int FileCount { get; private set; }
         public string OutputPath { get; private set; }
         public string OpenError { get; private set; }
+        /// <summary>How many times the receiver moved to another transfer (the sender changed) on its way here.</summary>
+        public int Switches { get; set; }
 
         public static OpticalReceiveResult NotRecognized()
         {
@@ -363,6 +420,8 @@ namespace FileXfer
     {
         private const int HeaderLength = 20;
         private const int MaximumBlockLength = 2933;
+        /// <summary>Blocks one transfer may have: 64 MiB in FX2's smallest frames, with room to spare.</summary>
+        public const int MaximumBlocks = 1 << 20;
         // FileXfer wraps as much as 64 MiB of file content in a DCB1 manifest and
         // then in the upstream DCF2 envelope. Keep the content limit at 64 MiB,
         // while allowing the protected stream to carry that bounded metadata.
@@ -392,11 +451,10 @@ namespace FileXfer
                 return false;
             }
 
-            var blockCount = ReadUInt16(bytes, 8);
+            var countField = ReadUInt16(bytes, 8);
             var blockLength = ReadUInt16(bytes, 10);
             var totalLengthRaw = ReadUInt32(bytes, 12);
-            if (blockCount == 0
-                || blockLength == 0
+            if (blockLength == 0
                 || blockLength > MaximumBlockLength
                 || totalLengthRaw == 0
                 || totalLengthRaw > MaximumPayloadLength
@@ -405,8 +463,10 @@ namespace FileXfer
                 return false;
             }
 
+            // The count field holds the low 16 bits (FX2 sends more blocks than a QR transfer can).
             var totalLength = (int)totalLengthRaw;
-            if ((totalLength + blockLength - 1) / blockLength != blockCount)
+            var blockCount = (totalLength + blockLength - 1) / blockLength;
+            if ((blockCount & 0xFFFF) != countField || blockCount > MaximumBlocks)
             {
                 return false;
             }

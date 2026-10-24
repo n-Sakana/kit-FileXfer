@@ -1,7 +1,7 @@
 # FileXfer
 
-ファイルやフォルダを、画面の QR とカメラの間で運ぶ光学転送アプリです。
-送受信、スマホの PWA リモコン、QR の表示・読取り設定を備えています。
+ファイルやフォルダを、画面とカメラの間で運ぶ光学転送アプリです。
+送受信、スマホの PWA リモコン、表示（Tile / QR）と読取りの設定を備えています。
 
 [decimen-optical-transfer](https://github.com/bashalarmistalt/decimen-optical-transfer)
 v0.3.0 を基にしています。ライセンスは [第三者表示](THIRD-PARTY-NOTICES.md) を参照してください。
@@ -19,8 +19,9 @@ v0.3.0 を基にしています。ライセンスは [第三者表示](THIRD-PAR
 ダウンロードした zip から展開した場合は、ランタイムの DLL を
 `%LOCALAPPDATA%\FileXfer\runtime` に書き写してから読み込みます。
 
-`runtime\windows-x64` と `ui\MiniUI.App.dll` は `tools\windows\build.cmd` で作ります。
-.NET SDK 9、Visual Studio の C++ ビルドツール、隣のフォルダにある miniUI のソースが必要です。
+`tools\windows\build.cmd` は FileXfer の本体と終了処理用 DLL をビルドします。
+.NET SDK 9 と Visual Studio の C++ ビルドツールが必要です。
+MiniUI の DLL は `runtime\windows-x64` に同梱してあり、MiniUI の repo は不要です。
 
 `install.bat` は管理者権限を使わず、HKCU のファイル・フォルダ・エクスプローラ背景・
 デスクトップ背景に **FileXfer** を登録します。ファイル／フォルダでは
@@ -41,6 +42,45 @@ QR の既定値は 1000 bytes / 30 fps / 誤り訂正 L です。
 
 `--port` で待受ポートを指定できます。
 
+## 表示：Tile と QR
+
+送る画面の「表示」で Tile（既定）と QR を切り替えます。設定欄は方式ごとに別で、切り替えると欄の中身だけが入れ替わります。
+受け取る側は、どちらが映っても設定なしで読みます。
+スマホの PWA は QR で送受信します。スマホのカメラでこの画面を読むときは、「表示」を QR にしてから出します。
+
+Tile は窓いっぱいを白黒のセルで埋めます。48 セルごとに位置マーカー（黒い 3×3、白い枠、ID の環）を置き、
+4 つのマーカーで囲まれたパッチ 1 つに Fountain フレーム 1 個を CRC-32 と Reed-Solomon 付きで載せます。
+パッチは独立しているので、画面の一部しか映っていなくても、傾いていても、写った区画の分だけ進みます。
+既定は 15 fps（30 fps のカメラの半分）です。ローリングシャッターでどの行も 1 回は 1 枚の絵の中で撮れるので、
+絵の切り替わりで全部が読めなくなることがありません。
+
+| 設定 | 意味 |
+| --- | --- |
+| セルの大きさ | 1 セルの大きさ（CSS px、既定 3）。画面にはそれに表示倍率を掛けた端末の画素の整数で描きます。カメラで 2 画素ほどまで読めます |
+| 中央の粗い区画 | 既定はなし。2 倍・3 倍を選ぶと中央にセルの大きい区画（最大 2×2 パッチ）を置き、遠い・ピントが外れたカメラでも中央だけで進みます |
+| 誤り訂正 | L / M / Q / H。パッチの Reed-Solomon の量（既定 M） |
+| 1 秒の枚数 | 既定 15 fps（QR は別に覚え、既定 30 fps・誤り訂正 L） |
+
+形式と読み取りは `src/Optical/Fx2.cs` と `src/Optical/Fx2Reader.cs`、カメラなしの試験は `tests/Fx2Lab.cs` です。
+設定や起動引数・送る符号の中では、Tile を `fx2` と呼びます（`--layout fx2`）。
+
+## 測定用の起動
+
+窓を出してすぐ送る・読むための起動です。指定はその窓だけに効き、保存されません。
+
+```bash
+./FileXfer --port 18431 --path ./資料.pdf --send --layout fx2 --cell 6 --coarse 2 --fps 15 --ec M
+./FileXfer --port 18431 --path ./資料.pdf --send --layout qr --fps 30 --frame-bytes 1000 --ec L --qr-size 900
+```
+
+```powershell
+.\FileXfer.cmd --port 18432 --receive --camera C920 --camera-width 1920 --camera-fps 30 --workers 3 --output .\受信
+```
+
+`--keystone-x` / `--keystone-y`（%）は絵を台形にゆがめて出し、カメラを動かさずに傾きへの強さを測ります。
+Linux の窓は `--window-at X,Y`（X11 の画素、xrandr や wmctrl と同じ単位）、`--window WxH`、`--fullscreen` で置けます。
+`--window-at` と `--fullscreen` を一緒に使うと、窓が指定の位置に来たのを確かめてから全画面にし、5 秒たっても来なければ全画面にしません。
+
 ## Linux・開発
 
 ```bash
@@ -50,7 +90,11 @@ dotnet run --project FileXfer.csproj -- --no-browser
 
 .NET SDK 9 を使います。HTTP 画面は表示された localhost URL から開きます。
 Linux の起動コマンドは `./FileXfer` です。Windows と同じ `ui/` の画面を MiniUI で開きます。
-別途 MiniUI ソースを必要とするため、[Linux 手順](tools/linux/README.md) を参照してください。
+MiniUI の DLL は `runtime/linux-x64` に同梱してあり、MiniUI の repo は不要です。
+詳しくは [Linux 手順](tools/linux/README.md) を参照してください。
+
+MiniUI を更新するときだけ、選んだ版から作った部品を FileXfer の `runtime/` で入れ替えます。
+通常の起動・ビルドでは外部の MiniUI を読みません。[部品と更新手順](runtime/README.md)を参照してください。
 
 スマホの PWA リモコンには、Tailscale の HTTPS 接続を利用できます。
 

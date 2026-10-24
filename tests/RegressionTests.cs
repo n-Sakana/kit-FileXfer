@@ -36,6 +36,7 @@ namespace FileXfer
                 Run("error-correction byte capacities", TestCapacities);
                 Run("tiny transfer gets a smaller QR", TestTiny);
                 Run("receiver completion, file integrity, pin and cancellation", TestReceiver);
+                Run("receiver moves to a new sender only when the old one is gone", TestSwitch);
                 Run("protected container rejects corruption", TestCorruption);
                 Run("file selection rejects duplicates and traversal", TestSelection);
                 Run("parallel output directories are unique", TestOutputDirectories);
@@ -169,6 +170,46 @@ namespace FileXfer
             Require(again.Complete && again.OutputPath == complete.OutputPath, "completion retry created another output");
             receiver.Stop("first"); Require(!receiver.AddFrame("first", Wire(payload, 1, 1776), false).Recognized, "late POST resurrected stop");
             receiver.Reset("first"); Require(receiver.AddFrame("first", Wire(payload, 1, 1776), false).Recognized, "explicit restart rejected");
+        }
+        private static void TestSwitch()
+        {
+            var payload = Payload().Bytes; var receiver = new OpticalReceiveService(Path.Combine(_root, "switch"));
+            var saved = OpticalReceiveService.SwitchAfter;
+            OpticalReceiveService.SwitchAfter = TimeSpan.FromMilliseconds(300);
+            try
+            {
+                // Both senders in view: the first transfer keeps the receiver however long it lasts.
+                receiver.Reset("both");
+                Require(receiver.AddFrame("both", Wire(payload, 0, 1776), false).Recognized, "first frame rejected");
+                var until = DateTime.UtcNow.AddMilliseconds(800);
+                for (uint sequence = 1; DateTime.UtcNow < until; sequence++)
+                {
+                    Require(!receiver.AddFrame("both", Wire(payload, sequence, 1777), false).Recognized, "switched while both were in view");
+                    receiver.AddFrame("both", Wire(payload, sequence, 1776), false);
+                    System.Threading.Thread.Sleep(20);
+                }
+                // The first sender is gone: after SwitchAfter of the other one alone, the receiver moves to it.
+                receiver.Reset("gone");
+                Require(receiver.AddFrame("gone", Wire(payload, 0, 1776), false).Recognized, "first frame rejected");
+                OpticalReceiveResult moved = null;
+                uint next = 1;
+                for (until = DateTime.UtcNow.AddSeconds(3); DateTime.UtcNow < until && moved == null; next++)
+                {
+                    var result = receiver.AddFrame("gone", Wire(payload, next, 1777), false);
+                    if (result.Recognized) moved = result;
+                    System.Threading.Thread.Sleep(20);
+                }
+                Require(moved != null && moved.Switches == 1, "did not move to the new sender");
+                OpticalReceiveResult complete = null;
+                for (; next < 6000 && complete == null; next++)
+                {
+                    var result = receiver.AddFrame("gone", Wire(payload, next, 1777), false);
+                    if (result.Complete) complete = result;
+                }
+                Require(complete != null && complete.Switches == 1, "the new transfer did not finish");
+                Require(File.ReadAllBytes(Path.Combine(complete.OutputPath, "sample.bin")).SequenceEqual(_sample), "saved bytes differ after the switch");
+            }
+            finally { OpticalReceiveService.SwitchAfter = saved; }
         }
         private static void TestCorruption()
         {

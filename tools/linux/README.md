@@ -1,8 +1,9 @@
 # FileXfer の Linux 起動
 
 NixOS では `./FileXfer` が .NET SDK 9・GTK3/X11・ffmpeg 等の環境で
-MiniUI ホストをビルドして起動します。MiniUI ソースの既定の場所は、このリポジトリから
-見て `../miniUI` です。別の場所にある場合は `MINIUI_ROOT` で指定します。
+FileXfer のホストをビルドして起動します。MiniUI は、このリポジトリの
+`runtime/linux-x64` にあるビルド済み DLL を使います。MiniUI の repo は不要です。
+部品を更新する場合は [更新手順](../../runtime/README.md) を参照してください。
 
 ```bash
 ./FileXfer --path ./input

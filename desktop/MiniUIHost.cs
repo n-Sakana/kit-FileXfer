@@ -13,7 +13,9 @@ namespace FileXfer;
 
 /// <summary>FileXfer on Linux: MiniUI (GTK3/X11) shows ui/index.html, the same page as on Windows, and NativeApp
 /// answers its uiHost.call and app: images in this process (the Windows build loads the same code as MiniUI.App.dll).
-/// --no-browser and --help run only the HTTP server, as before.</summary>
+/// --no-browser and --help run only the HTTP server, as before. --window-at X,Y (X11 pixels), --window WxH and
+/// --fullscreen place the window from the command line (measurement set-ups on a desktop that takes no remote
+/// input); with --window-at, fullscreen waits until the window is where asked.</summary>
 internal static class MiniUIHost
 {
     public static int Main(string[] args)
@@ -27,8 +29,9 @@ internal static class MiniUIHost
     private static int Run(string[] args)
     {
         string? home = null, fontDir = null, stateDir = null, screenshot = null;
-        bool mcp = false;
+        bool mcp = false, fullscreen = false;
         double duration = 0;
+        int[]? windowAt = null, windowSize = null;
         var appArgs = new List<string>();
         for (int i = 0; i < args.Length; i++)
         {
@@ -41,6 +44,9 @@ internal static class MiniUIHost
                 case "--screenshot": screenshot = Path.GetFullPath(Next()); break;
                 case "--duration-ms": duration = double.Parse(Next(), CultureInfo.InvariantCulture); break;
                 case "--mcp": mcp = true; break;
+                case "--fullscreen": fullscreen = true; break;
+                case "--window-at": windowAt = Pair(Next(), "--window-at", ','); break;
+                case "--window": windowSize = Pair(Next(), "--window", 'x'); break;
                 default: appArgs.Add(args[i]); break;
             }
         }
@@ -71,9 +77,23 @@ internal static class MiniUIHost
         try
         {
             using var fonts = new LinuxFonts(fontDir);
-            using var window = new LinuxWindow(options.Width, options.Height, options.Title, fonts);
-            using var fetcher = new LinuxFetcher();
-            using var engine = new Engine(window, fetcher, options);
+            using var window = new LinuxWindow(windowSize?[0] ?? options.Width, windowSize?[1] ?? options.Height, options.Title, fonts);
+            // --window-at is in X11 pixels (as xrandr and wmctrl give them); GTK places windows in its own units, the
+            // X11 pixels divided by the window's scale (2 under a doubled XWayland). Fullscreen waits until the
+            // window is seen at the place asked for, then names the monitor there; if the window never gets there it
+            // stays a window (it must not cover whichever screen it happened to open on). (Hiding the window while
+            // placing it left it minimised under Mutter.)
+            int[]? target = null;
+            if (windowAt != null)
+            {
+                double scale = Math.Max(1, window.Scale);
+                target = new[] { (int)Math.Round(windowAt[0] / scale), (int)Math.Round(windowAt[1] / scale) };
+                window.MoveTo(target[0], target[1]);
+            }
+            if (windowSize != null) window.ResizeTo(windowSize[0], windowSize[1]);
+            bool pendingFullscreen = fullscreen && target != null;
+            if (fullscreen && target == null) window.SetFullscreen(true);
+            using var engine = new Engine(window, options);
             engine.ConsoleSink = Console.Error.WriteLine;
             engine.LoadControl(entry);
             var clock = Stopwatch.StartNew();
@@ -86,6 +106,21 @@ internal static class MiniUIHost
             bool Pump()
             {
                 window.Pump(input => { engine.HandleInput(input); SyncIme(); });
+                if (pendingFullscreen)
+                {
+                    var bounds = window.GetBounds();
+                    if (Math.Abs(bounds.X - target![0]) <= 64 && Math.Abs(bounds.Y - target[1]) <= 64)
+                    {
+                        pendingFullscreen = false;
+                        if (!FullscreenAt(target[0], target[1])) window.SetFullscreen(true);
+                    }
+                    else if (clock.ElapsedMilliseconds > 5000)
+                    {
+                        pendingFullscreen = false;
+                        Console.Error.WriteLine("--window-at: the window stayed at " + bounds.X + "," + bounds.Y + " (asked " + target[0] + "," + target[1] +
+                            " in window units); not going fullscreen.");
+                    }
+                }
                 if (Volatile.Read(ref stopping) != 0 || (duration > 0 && clock.Elapsed.TotalMilliseconds >= duration)) engine.Closed = true;
                 if (!engine.Closed && !window.Closed) { engine.RunFrame(); SyncIme(); }
                 return !engine.Closed && !window.Closed;
@@ -113,6 +148,61 @@ internal static class MiniUIHost
             native.Dispose();
         }
         return 0;
+    }
+
+    // Fullscreen on a named monitor. Mutter with a scaled XWayland may take the window to be on another monitor than
+    // the one it shows on and fill that one (seen: a window at the EV2450's corner given a portrait EV2740S's size),
+    // so the monitor is named through _NET_WM_FULLSCREEN_MONITORS (gtk_window_fullscreen_on_monitor). The window is
+    // this process's GTK toplevel at the place asked for (MiniUI shows one). GTK units throughout.
+    [DllImport("libgtk-3.so.0")] private static extern nint gtk_window_list_toplevels();
+    [DllImport("libgtk-3.so.0")] private static extern void gtk_window_get_position(nint window, out int x, out int y);
+    [DllImport("libgtk-3.so.0")] private static extern int gtk_widget_get_visible(nint widget);
+    [DllImport("libgtk-3.so.0")] private static extern void gtk_window_fullscreen_on_monitor(nint window, nint screen, int monitor);
+    [DllImport("libgtk-3.so.0")] private static extern void gtk_window_deiconify(nint window);
+    [DllImport("libgtk-3.so.0")] private static extern void gtk_window_present(nint window);
+    [DllImport("libgdk-3.so.0")] private static extern nint gdk_screen_get_default();
+    [DllImport("libgdk-3.so.0")] private static extern int gdk_screen_get_monitor_at_point(nint screen, int x, int y);
+    [DllImport("libgdk-3.so.0")] private static extern void gdk_screen_get_monitor_geometry(nint screen, int monitor, out GdkRectangle geometry);
+    [StructLayout(LayoutKind.Sequential)] private struct GdkRectangle { public int X, Y, Width, Height; }
+    [DllImport("libglib-2.0.so.0")] private static extern void g_list_free(nint list);
+
+    private static bool FullscreenAt(int x, int y)
+    {
+        try
+        {
+            nint list = gtk_window_list_toplevels(), found = 0;
+            for (nint node = list; node != 0; node = Marshal.ReadIntPtr(node, IntPtr.Size))
+            {
+                nint candidate = Marshal.ReadIntPtr(node);
+                if (candidate == 0 || gtk_widget_get_visible(candidate) == 0) continue;
+                gtk_window_get_position(candidate, out int wx, out int wy);
+                if (Math.Abs(wx - x) <= 64 && Math.Abs(wy - y) <= 64) { found = candidate; break; }
+            }
+            if (list != 0) g_list_free(list);
+            if (found == 0) return false;
+            nint screen = gdk_screen_get_default();
+            int monitor = gdk_screen_get_monitor_at_point(screen, x + 8, y + 8);
+            gdk_screen_get_monitor_geometry(screen, monitor, out var geometry);
+            gtk_window_fullscreen_on_monitor(found, screen, monitor);
+            gtk_window_deiconify(found);
+            gtk_window_present(found);
+            Console.Error.WriteLine("--fullscreen: monitor " + monitor + " (" + geometry.X + "," + geometry.Y + " " + geometry.Width + "x" + geometry.Height +
+                ") for the window at " + x + "," + y + " (window units)");
+            return true;
+        }
+        catch (Exception error) when (error is DllNotFoundException || error is EntryPointNotFoundException)
+        {
+            return false;
+        }
+    }
+
+    private static int[] Pair(string value, string option, char separator)
+    {
+        var parts = value.Split(separator);
+        if (parts.Length != 2 || !int.TryParse(parts[0], NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out int a)
+            || !int.TryParse(parts[1], NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out int b))
+            throw new ArgumentException(option + " needs two numbers, e.g. " + (separator == ',' ? "0,0" : "1920x1080"));
+        return new[] { a, b };
     }
 
     /// <summary>The FileXfer folder: two levels above artifacts/miniui-linux when that is where this host runs.</summary>

@@ -1,5 +1,5 @@
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- FileXfer for Linux: MiniUI's engine and GTK3/X11 layer (from the miniUI sources, read only) showing ../ui with
+  <!-- FileXfer for Linux: the bundled MiniUI engine and GTK3/X11 layer showing ../ui with
        FileXfer's native component (../native) in the same process. Built by tools/linux/build.sh. -->
   <PropertyGroup>
     <OutputType>Exe</OutputType>
@@ -10,21 +10,20 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Nullable>enable</Nullable>
     <NoWarn>$(NoWarn);CA1416;CS8632;CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8625;SYSLIB0050</NoWarn>
-    <MiniUIRoot Condition="'$(MiniUIRoot)' == ''">$(MSBuildThisFileDirectory)../../miniUI</MiniUIRoot>
   </PropertyGroup>
-  <!-- Read-only source inclusion: never creates bin/obj or changes files in MiniUI. -->
   <ItemGroup>
-    <Compile Include="$(MiniUIRoot)/src/MiniUI.Core/**/*.cs;$(MiniUIRoot)/src/MiniUI.Platform.Linux/**/*.cs"
-             Exclude="$(MiniUIRoot)/src/**/obj/**;$(MiniUIRoot)/src/**/bin/**" />
+    <Reference Include="MiniUI.Core"><HintPath>../runtime/linux-x64/MiniUI.Core.dll</HintPath><Private>true</Private></Reference>
+    <Reference Include="MiniUI.Platform.Linux"><HintPath>../runtime/linux-x64/MiniUI.Platform.Linux.dll</HintPath><Private>true</Private></Reference>
     <Compile Include="../src/**/*.cs" />
     <Compile Include="../native/*.cs;../native/Linux/*.cs" />
     <Compile Include="*.cs" />
     <Reference Include="zxing"><HintPath>../lib/zxing.dll</HintPath><Private>true</Private></Reference>
     <EmbeddedResource Include="../web/*" LogicalName="FileXfer.Web.%(Filename)%(Extension)" />
     <EmbeddedResource Include="../ui/fonts/Inter-*.ttf" LogicalName="FileXfer.Fonts.%(Filename)%(Extension)" />
-    <None Include="$(MiniUIRoot)/LICENSE" Link="licenses/MiniUI-LICENSE" CopyToOutputDirectory="PreserveNewest" Condition="Exists('$(MiniUIRoot)/LICENSE')" />
+    <None Include="../runtime/linux-x64/MINIUI_SOURCE_REVISION" Link="MINIUI_SOURCE_REVISION" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="../runtime/MiniUI-THIRD-PARTY-NOTICES.md" Link="licenses/MiniUI-THIRD-PARTY-NOTICES.md" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
   <Target Name="CheckMiniUI" BeforeTargets="PrepareForBuild">
-    <Error Condition="!Exists('$(MiniUIRoot)/src/MiniUI.Core/Engine/Types.cs')" Text="Set -p:MiniUIRoot=/path/to/miniUI (read-only source dependency)." />
+    <Error Condition="!Exists('$(MSBuildThisFileDirectory)../runtime/linux-x64/MiniUI.Core.dll') Or !Exists('$(MSBuildThisFileDirectory)../runtime/linux-x64/MiniUI.Platform.Linux.dll')" Text="The bundled MiniUI DLLs are missing from runtime/linux-x64. Restore them from the FileXfer distribution." />
   </Target>
 </Project>

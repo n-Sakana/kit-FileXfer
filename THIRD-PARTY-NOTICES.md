@@ -2,6 +2,12 @@
 
 FileXfer は、次の第三者ソフトウェアと書体を基礎とするか、同梱しています。
 
+## MiniUI
+
+画面の表示に使うビルド済み部品を `runtime/linux-x64` と `runtime/windows-x64` に同梱しています。
+版と更新方法は [`runtime/README.md`](runtime/README.md)、
+部品に付属する第三者表示は [`runtime/MiniUI-THIRD-PARTY-NOTICES.md`](runtime/MiniUI-THIRD-PARTY-NOTICES.md) を参照してください。
+
 ## Decimen Optical Transfer
 
 FileXfer は [bashalarmistalt/decimen-optical-transfer](https://github.com/bashalarmistalt/decimen-optical-transfer)

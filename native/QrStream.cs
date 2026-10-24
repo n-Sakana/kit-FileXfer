@@ -30,6 +30,16 @@ namespace FileXfer
 
         public string Error { get { lock (_gate) return _error; } }
 
+        /// <summary>Frames sequence, sequence+1, ... laid out columns x rows (row-major) in one image, or the single
+        /// frame when 1 x 1.</summary>
+        public IAppImage Tiles(uint sequence, int scale, int columns, int rows)
+        {
+            if (columns == 1 && rows == 1) return Frame(sequence, scale);
+            var tiles = new ScaledQr[columns * rows];
+            for (int i = 0; i < tiles.Length; i++) tiles[i] = Frame(unchecked(sequence + (uint)i), scale);
+            return new TiledQr(tiles, columns, rows);
+        }
+
         /// <summary>The frame for this sequence number at scale pixels per module (rendered now when not ready yet).</summary>
         public ScaledQr Frame(uint sequence, int scale)
         {

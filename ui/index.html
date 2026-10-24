@@ -44,21 +44,41 @@
         </div>
         <div class="side">
           <h2 class="label">送り方</h2>
-          <div class="field"><span class="field-name">1 枚の量</span>
-            <button class="select" type="button" id="frameBytes" data-menu="frameBytes"><span class="select-value"></span><span class="chevron"></span></button></div>
-          <div class="field"><span class="field-name">1 秒の枚数</span>
-            <button class="select" type="button" id="frameRate" data-menu="frameRate"><span class="select-value"></span><span class="chevron"></span></button></div>
-          <div class="field"><span class="field-name">誤り訂正</span>
-            <span class="seg" id="ecGroup"><button type="button" data-ec="L">L</button><button type="button" data-ec="M">M</button><button type="button" data-ec="Q">Q</button><button type="button" data-ec="H">H</button></span></div>
-          <div class="field"><span class="field-name">QR の大きさ</span>
-            <span class="stepper"><button type="button" class="step" id="qrSmaller" aria-label="小さくする"></button><span class="step-value" id="qrSizeValue"></span><button type="button" class="step plus" id="qrLarger" aria-label="大きくする"></button></span></div>
+          <div class="field"><span class="field-name">表示</span>
+            <span class="seg" id="layoutGroup"><button type="button" data-layout="fx2">Tile</button><button type="button" data-layout="qr">QR</button></span></div>
+          <!-- The chosen method's own settings, in a box of fixed height: switching the method changes what is in the
+               box and nothing outside it. Both put the frame rate on the second row and error correction on the fourth. -->
+          <div class="methods">
+            <div class="method" data-for="fx2">
+              <div class="field"><span class="field-name">セルの大きさ</span>
+                <span class="stepper"><button type="button" class="step" id="cellSmaller" aria-label="小さくする"></button><span class="step-value" id="cellValue"></span><button type="button" class="step plus" id="cellLarger" aria-label="大きくする"></button></span></div>
+              <div class="field"><span class="field-name">1 秒の枚数</span>
+                <button class="select" type="button" id="tileRate" data-menu="tileRate"><span class="select-value"></span><span class="chevron"></span></button></div>
+              <div class="field"><span class="field-name">中央の粗い区画</span>
+                <span class="seg" id="coarseGroup"><button type="button" data-coarse="0">なし</button><button type="button" data-coarse="2">2 倍</button><button type="button" data-coarse="3">3 倍</button></span></div>
+              <div class="field"><span class="field-name">誤り訂正</span>
+                <span class="seg" id="tileEcGroup"><button type="button" data-ec="L">L</button><button type="button" data-ec="M">M</button><button type="button" data-ec="Q">Q</button><button type="button" data-ec="H">H</button></span></div>
+            </div>
+            <div class="method" data-for="qr">
+              <div class="field"><span class="field-name">1 枚の量</span>
+                <button class="select" type="button" id="frameBytes" data-menu="frameBytes"><span class="select-value"></span><span class="chevron"></span></button></div>
+              <div class="field"><span class="field-name">1 秒の枚数</span>
+                <button class="select" type="button" id="frameRate" data-menu="frameRate"><span class="select-value"></span><span class="chevron"></span></button></div>
+              <div class="field"><span class="field-name">並べる枚数</span>
+                <button class="select" type="button" id="columns" data-menu="columns"><span class="select-value"></span><span class="chevron"></span></button></div>
+              <div class="field"><span class="field-name">誤り訂正</span>
+                <span class="seg" id="ecGroup"><button type="button" data-ec="L">L</button><button type="button" data-ec="M">M</button><button type="button" data-ec="Q">Q</button><button type="button" data-ec="H">H</button></span></div>
+              <div class="field"><span class="field-name">QR の大きさ</span>
+                <span class="stepper"><button type="button" class="step" id="qrSmaller" aria-label="小さくする"></button><span class="step-value" id="qrSizeValue"></span><button type="button" class="step plus" id="qrLarger" aria-label="大きくする"></button></span></div>
+            </div>
+          </div>
         </div>
       </div>
       <footer class="card-foot">
         <span class="summary" id="sendSummary"></span>
         <span class="actions">
           <button class="btn wide" type="button" id="phoneShowQr">スマホに QR を出す</button>
-          <button class="btn primary wide" type="button" id="showQr">この画面に QR を出す</button>
+          <button class="btn primary wide" type="button" id="showQr">この画面に出す</button>
         </span>
       </footer>
     </section>
@@ -71,7 +91,7 @@
           <div class="preview" id="preview">
             <img class="preview-image" id="previewImage" alt="">
             <span class="preview-idle" id="previewIdle">カメラは止まっています</span>
-            <div class="hint" id="quietHint" hidden><span>QR が映っていません</span><button class="link" type="button" id="tipsButton">読めないとき</button></div>
+            <div class="hint" id="quietHint" hidden><span>送る画面が映っていません</span><button class="link" type="button" id="tipsButton">読めないとき</button></div>
           </div>
           <div class="meter">
             <div class="meter-row"><span class="meter-state" id="receiveState">待っています</span><span class="meter-eta" id="receiveEta"></span></div>
@@ -153,10 +173,10 @@
   <div class="dialog" role="dialog" aria-labelledby="tipsTitle">
     <h2 class="dialog-title" id="tipsTitle">読めないとき</h2>
     <ul class="tips">
-      <li>送る側の「1 枚の量」を 1,465 bytes まで下げます。</li>
-      <li>それでも読めなければ、送る側を 24 fps まで下げます。</li>
-      <li>QR がカメラの視野いっぱいに入るようにして、端末を何かに立てかけます。</li>
-      <li>QR を出している画面の明るさを最大にします。</li>
+      <li>Tile なら、送る側の「セルの大きさ」を 1 px ずつ大きくするか、「中央の粗い区画」を 2 倍にします。画面の一部しか映っていなくても読めます。</li>
+      <li>QR なら、送る側の「1 枚の量」を 1,465 bytes まで下げ、それでも読めなければ 24 fps まで下げます。QR は全体が映っている必要があります。</li>
+      <li>カメラを何かに立てかけて動かないようにし、ピントが合うまで数秒待ちます。</li>
+      <li>送る画面の明るさを最大にします。</li>
     </ul>
     <div class="dialog-actions"><button class="btn primary wide" type="button" id="tipsClose">閉じる</button></div>
   </div>

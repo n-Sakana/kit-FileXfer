@@ -102,6 +102,45 @@ namespace FileXfer
             return session.Describe();
         }
 
+        /// <summary>Starts an FX2 display session: every patch carries one fountain frame of the size the
+        /// error-correction level leaves (see Fx2Code). FX2 frames are small, so a session may have more blocks than
+        /// a QR transfer (OpticalFrame.MaximumBlocks).</summary>
+        public OpticalStartResult StartFx2(FolderSnapshot source, IList<string> selectedNames, int framesPerSecond, string errorCorrection)
+        {
+            var stamp = Diagnostics.Stamp();
+            var preparation = Guid.NewGuid().ToString("N");
+            Diagnostics.Event("send.prepare.start", preparation, new { Layout = "fx2", Fps = framesPerSecond, Ec = errorCorrection,
+                Files = selectedNames == null ? 0 : selectedNames.Count });
+            try
+            {
+                if (framesPerSecond < 1 || framesPerSecond > 60) throw new ArgumentException("1 秒あたりの枚数が正しくありません。", "framesPerSecond");
+                var code = Fx2Code.ForLevel(Fx2Code.ParseLevel(errorCorrection));
+                var payload = OpticalPayload.Build(source, selectedNames, MaximumFiles, MaximumBundleBytes, preparation);
+                var session = new OpticalSession(payload, code.FrameBytes, framesPerSecond, errorCorrection, true);
+                lock (_gate)
+                {
+                    PruneSessions();
+                    if (_sessions.Count >= 4) throw new ArgumentException("QR 表示が多すぎます。不要な表示を閉じてください。");
+                    _sessions.Add(session.Describe().Token, session);
+                }
+                Diagnostics.Event("send.ready", session.TransferId, new { Preparation = preparation, Layout = "fx2", Files = payload.FileCount,
+                    OriginalBytes = payload.OriginalBytes, TransmittedBytes = payload.Bytes.Length, FrameBytes = code.FrameBytes,
+                    Fps = framesPerSecond, Ec = errorCorrection });
+                return session.Describe();
+            }
+            catch (Exception error) { Diagnostics.Failure("send.prepare", preparation, error); throw; }
+            finally { Diagnostics.Event("send.prepare.end", preparation, new { Ms = Diagnostics.Milliseconds(stamp) }); }
+        }
+
+        /// <summary>The fountain frame (header and block) for a sequence number, as an FX2 patch carries it.</summary>
+        public bool TryFrame(string token, uint sequence, out byte[] frame)
+        {
+            OpticalSession session;
+            lock (_gate) { session = FindSession(token); }
+            frame = session == null ? null : session.Frame(sequence);
+            return frame != null;
+        }
+
         private static int MaximumBytesForCorrection(string correction)
         {
             // QR version 40, byte mode, without ECI (same as CreateQr).
@@ -288,13 +327,15 @@ namespace FileXfer
         private readonly byte[] _payload;
         private readonly FountainEncoder _encoder;
         private readonly uint _payloadFnv;
+        private readonly bool _fx2;
         private int _qrVersion;
 
         public OpticalSession(
             OpticalPayload payload,
             int frameBytes,
             int framesPerSecond,
-            string errorCorrection)
+            string errorCorrection,
+            bool fx2 = false)
         {
             _token = Guid.NewGuid().ToString("N");
             LastUsedUtc = DateTime.UtcNow;
@@ -302,14 +343,17 @@ namespace FileXfer
             _frameBytes = frameBytes;
             _framesPerSecond = framesPerSecond;
             _errorCorrectionName = errorCorrection;
-            _errorCorrection = ParseErrorCorrection(errorCorrection);
+            _errorCorrection = fx2 ? ErrorCorrectionLevel.L : ParseErrorCorrection(errorCorrection);
+            _fx2 = fx2;
             _payload = payload.Bytes;
             _encoder = new FountainEncoder(
                 _payload,
                 frameBytes - FrameHeaderLength,
                 _sessionId);
             TransferId = Diagnostics.Transfer(_sessionId, _encoder.BlockCount, _encoder.BlockLength, _payload.Length);
-            if (_encoder.BlockCount > ushort.MaxValue)
+            // QR frames (and the phone's reader) count blocks in 16 bits; FX2 frames carry the low 16 bits and the
+            // receiver derives the count from the lengths.
+            if (_encoder.BlockCount > (fx2 ? OpticalFrame.MaximumBlocks : ushort.MaxValue))
             {
                 throw new ArgumentException(
                     "選んだ内容はこの設定では大きすぎます。1 枚に載せる量を増やしてください。");
@@ -357,6 +401,28 @@ namespace FileXfer
                 (double)_encoder.BlockCount / _framesPerSecond);
             result.TransferId = TransferId;
             return result;
+        }
+
+        /// <summary>The fountain frame for a sequence number without a QR code (FX2 patches).</summary>
+        public byte[] Frame(uint sequence)
+        {
+            var block = _encoder.Encode(sequence);
+            var frame = new byte[FrameHeaderLength + block.Length];
+            WriteHeader(frame, sequence);
+            Buffer.BlockCopy(block, 0, frame, FrameHeaderLength, block.Length);
+            return frame;
+        }
+
+        private void WriteHeader(byte[] frame, uint sequence)
+        {
+            frame[0] = 0xd1;
+            frame[1] = 0x0c;
+            WriteUInt16(frame, 2, _sessionId);
+            WriteUInt32(frame, 4, sequence);
+            WriteUInt16(frame, 8, _fx2 ? unchecked((ushort)_encoder.BlockCount) : checked((ushort)_encoder.BlockCount));
+            WriteUInt16(frame, 10, checked((ushort)_encoder.BlockLength));
+            WriteUInt32(frame, 12, checked((uint)_payload.Length));
+            WriteUInt32(frame, 16, _payloadFnv);
         }
 
         public byte[] RenderFrame(uint sequence)
@@ -431,14 +497,7 @@ namespace FileXfer
         {
             var block = _encoder.Encode(sequence);
             frame = new byte[FrameHeaderLength + block.Length];
-            frame[0] = 0xd1;
-            frame[1] = 0x0c;
-            WriteUInt16(frame, 2, _sessionId);
-            WriteUInt32(frame, 4, sequence);
-            WriteUInt16(frame, 8, checked((ushort)_encoder.BlockCount));
-            WriteUInt16(frame, 10, checked((ushort)_encoder.BlockLength));
-            WriteUInt32(frame, 12, checked((uint)_payload.Length));
-            WriteUInt32(frame, 16, _payloadFnv);
+            WriteHeader(frame, sequence);
             Buffer.BlockCopy(block, 0, frame, FrameHeaderLength, block.Length);
             qr = CreateQr(frame, _errorCorrection, _qrVersion);
             if (_qrVersion > 0 && qr.Version.VersionNumber != _qrVersion)
